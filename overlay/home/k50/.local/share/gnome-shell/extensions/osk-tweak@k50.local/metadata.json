@@ -1,0 +1,7 @@
+{
+  "uuid": "osk-tweak@k50.local",
+  "name": "K50 OSK Tweak",
+  "description": "把小屏软键盘调高一点（按键更大、整体上移），避免最下面一行被裁。",
+  "shell-version": ["48"],
+  "version": 1
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=K50 restore BlueZ Low Energy mode after btmtk boot
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k50-ble-init.sh
+TimeoutStartSec=75
+
+[Install]
+WantedBy=bluetooth.target

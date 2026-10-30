@@ -1,0 +1,300 @@
+#!/bin/bash
+# ==============================================================================
+#  k50-image —— 镜像模式管理工具（在设备上跑）
+#
+#  镜像模式：只读 squashfs 系统层 + /data 上的可写 overlay。
+#  换系统 = 换一个 squashfs 文件 + 重启，不再刷 userdata，不再丢数据。
+#
+#  正常启动时由 image-mode/pivot（占着 /sbin/init）组装这两个层；
+#  本工具负责装镜像、切镜像、回滚、看状态、清理旧镜像。
+# ==============================================================================
+set -euo pipefail
+
+IMAGES=${K50_IMAGES:-/images}
+DATA=${K50_DATA:-/data}
+MARKER="$IMAGES/enabled"
+CURRENT="$IMAGES/system-current"
+UPPER="$DATA/upper"
+WORK="$DATA/work"
+KEEP_DEFAULT=3
+
+die() { printf '\033[31m错误：\033[0m%s\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
+ok() { printf '\033[32m  ✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m  ! \033[0m %s\n' "$*"; }
+
+need_root() { [ "$(id -u)" = 0 ] || die "需要 root（sudo $0 $*）"; }
+
+human() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "$1"; }
+
+is_bootstrap() {
+	# 引导层在 ext4 上：/ 不是 overlay
+	! grep -q ' / overlay ' /proc/mounts
+}
+
+running_image() {
+	# 从挂载参数里抓出 lowerdir 的镜像名
+	sed -n 's|^overlay / overlay .*lowerdir=\([^,]*\).*|\1|p' /proc/mounts 2>/dev/null | head -1
+}
+
+sha_of() { sha256sum "$1" | awk '{print $1}'; }
+
+check_squashfs() {
+	local f="$1"
+	[ -f "$f" ] || die "文件不存在：$f"
+	[ "$(dd if="$f" bs=4 count=1 2>/dev/null)" = "hsqs" ] ||
+		die "不是 squashfs 镜像（magic 不是 hsqs）：$f"
+}
+
+cmd_status() {
+	printf '镜像模式：%s\n' "$([ -e "$MARKER" ] && echo '已启用' || echo '未启用（走普通启动）')"
+	if is_bootstrap; then
+		echo "当前：引导层（ext4 根分区）"
+		if [ -e "$MARKER" ]; then
+			echo "      重启后会切到镜像模式"
+		fi
+	else
+		echo "当前：镜像模式（已 pivot 进只读系统层 + overlay）"
+		local ro; ro="$(running_image)"
+		if [ -n "$ro" ]; then
+			echo "      只读层：$ro"
+		fi
+	fi
+	if [ -L "$CURRENT" ]; then
+		echo "下次启动用：$(basename "$(readlink -f "$CURRENT")")"
+	elif [ -e "$CURRENT" ]; then
+		echo "下次启动用：$(basename "$CURRENT")"
+	else
+		echo "下次启动用：（未设置，重启会退回普通启动）"
+	fi
+
+	echo
+	printf '可写层 %s：' "$UPPER"
+	if [ -d "$UPPER" ]; then
+		echo "$(human "$(du -sb "$UPPER" 2>/dev/null | awk '{print $1}')")（改动量）"
+	else
+		echo "不存在"
+	fi
+	printf '空间：/images %s 可用，/data %s 可用\n' \
+		"$(human "$(df -B1 --output=avail "$IMAGES" 2>/dev/null | tail -1)")" \
+		"$(human "$(df -B1 --output=avail "$DATA" 2>/dev/null | tail -1)")"
+
+	echo
+	cmd_list
+}
+
+cmd_list() {
+	[ -d "$IMAGES" ] || die "$IMAGES 不存在"
+	local n=0 cur="" run=""
+	cur="$(basename "$(readlink -f "$CURRENT" 2>/dev/null || echo '')")"
+	run="$(running_image)"
+	if [ -n "$run" ]; then
+		run="$(basename "$run")"
+	fi
+	shopt -s nullglob
+	for f in "$IMAGES"/system-*.squashfs; do
+		local base size mark=""
+		base="$(basename "$f")"
+		size="$(human "$(stat -c%s "$f")")"
+		[ "$base" = "$cur" ] && mark=" ← 下次启动"
+		[ "$base" = "$run" ] && mark="$mark（正在用）"
+		printf '  %-34s %10s%s\n' "$base" "$size" "$mark"
+		n=$((n + 1))
+	done
+	[ "$n" = 0 ] && echo "  （没有镜像）"
+	return 0
+}
+
+cmd_install() {
+	need_root install
+	local src="${1:-}"; [ -n "$src" ] || die "用法：k50-image install <文件|URL> [--sha256 <期望值>]"
+	shift || true
+	local want=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--sha256) want="${2:-}"; shift 2 ;;
+			*) die "未知参数：$1" ;;
+		esac
+	done
+	[ -d "$IMAGES" ] || mkdir -p "$IMAGES"
+
+	local tmp="/tmp/k50-image-$$.squashfs"
+	case "$src" in
+		http://*|https://*)
+			info "下载 $src"
+			curl -fL --retry 3 --progress-bar -o "$tmp" "$src" || die "下载失败"
+			;;
+		*)
+			[ -f "$src" ] || die "文件不存在：$src"
+			info "复制本地镜像"
+			cp "$src" "$tmp"
+			;;
+	esac
+	check_squashfs "$tmp"
+
+	local got; got="$(sha_of "$tmp")"
+	if [ -n "$want" ] && [ "$got" != "$want" ]; then
+		rm -f "$tmp"
+		die "sha256 不匹配：期望 $want，实际 $got"
+	fi
+
+	local ts dst
+	ts="$(date -u '+%Y%m%d-%H%M%S')"
+	dst="$IMAGES/system-$ts.squashfs"
+	mv "$tmp" "$dst"
+	printf '%s  %s\n' "$got" "$(basename "$dst")" >"$dst.sha256"
+	ok "已装入 $(basename "$dst")（$(human "$(stat -c%s "$dst")")，sha256 ${got:0:16}…）"
+	echo "   切换： sudo k50-image activate $(basename "$dst")"
+	echo "   然后： sudo reboot"
+}
+
+cmd_activate() {
+	need_root activate
+	local name="${1:-}"; [ -n "$name" ] || die "用法：k50-image activate <镜像名|文件名|全部路径>"
+	[ -d "$IMAGES" ] || die "$IMAGES 不存在"
+	local target
+	if [ -f "$name" ]; then
+		target="$name"
+	elif [ -f "$IMAGES/$name" ]; then
+		target="$IMAGES/$name"
+	elif [ -f "$IMAGES/system-$name.squashfs" ]; then
+		target="$IMAGES/system-$name.squashfs"
+	elif [ -f "$IMAGES/$name.squashfs" ]; then
+		target="$IMAGES/$name.squashfs"
+	else
+		die "找不到镜像：$name（用 k50-image list 看有哪些）"
+	fi
+	check_squashfs "$target"
+
+	local rel
+	case "$target" in
+		"$IMAGES"/*) rel="$(basename "$target")" ;;
+		*) rel="$target" ;;
+	esac
+	ln -sfn "$rel" "$CURRENT.tmp"
+	mv -Tf "$CURRENT.tmp" "$CURRENT"
+	ok "下次启动使用 $rel"
+	echo "   重启生效： sudo reboot"
+	echo "   反悔：    sudo k50-image rollback && sudo reboot"
+}
+
+cmd_rollback() {
+	need_root rollback
+	local cur prev
+	cur="$(basename "$(readlink -f "$CURRENT" 2>/dev/null || echo '')")"
+	shopt -s nullglob
+	local all=("$IMAGES"/system-*.squashfs)
+	[ "${#all[@]}" -gt 0 ] || die "没有镜像可回滚"
+	prev=""
+	# 从新到旧找第一个不是当前目标的
+	for ((i = ${#all[@]} - 1; i >= 0; i--)); do
+		local b; b="$(basename "${all[$i]}")"
+		if [ "$b" != "$cur" ]; then prev="${all[$i]}"; break; fi
+	done
+	[ -n "$prev" ] || die "只有一个镜像，没有可回滚的目标"
+	cmd_activate "$(basename "$prev")"
+}
+
+cmd_enable() {
+	need_root enable
+	is_bootstrap || { ok "已经在镜像模式里跑了"; return 0; }
+	[ -d "$UPPER" ] || die "可写层不存在（先跑 scripts/enable-image-mode.sh 做一次性设置）"
+	[ -e "$CURRENT" ] || die "还没选镜像（k50-image activate <镜像>）"
+	touch "$MARKER"
+	ok "已启用：下次重启进入镜像模式"
+	warn "首次启用务必确认引导层 still 可启动（不要动 ext4 根分区）"
+}
+
+cmd_disable() {
+	need_root disable
+	rm -f "$MARKER"
+	ok "已停用：下次重启回到普通启动（ext4 根分区）"
+	echo "   /data 与 /images 里的东西都还在，可以再启用"
+}
+
+cmd_prune() {
+	need_root prune
+	local keep="${1:-$KEEP_DEFAULT}"
+	[[ "$keep" =~ ^[0-9]+$ ]] || die "保留数量得是数字"
+	local cur; cur="$(basename "$(readlink -f "$CURRENT" 2>/dev/null || echo '')")"
+	shopt -s nullglob
+	local all=("$IMAGES"/system-*.squashfs) n=0 removed=0
+	# 被引用的那个永远不删
+	for ((i = ${#all[@]} - 1; i >= 0; i--)); do
+		local b; b="$(basename "${all[$i]}")"
+		if [ "$b" = "$cur" ]; then
+			n=$((n + 1))
+			continue
+		fi
+		n=$((n + 1))
+		if [ "$n" -gt "$keep" ]; then
+			rm -f "${all[$i]}" "${all[$i]}.sha256"
+			ok "删除 $b"
+			removed=$((removed + 1))
+		fi
+	done
+	[ "$removed" = 0 ] && echo "  没有需要清理的（保留 $keep 个）"
+	return 0
+}
+
+cmd_diff() {
+	local top="${1:-30}"
+	[ -d "$UPPER" ] || die "可写层不存在：$UPPER"
+	echo "改动过的顶层目录（按占用排序，最多 $top 条）："
+	du -sh "$UPPER"/* 2>/dev/null | sort -rh | head -n "$top"
+	echo
+	printf '改动文件数：%s（overlay 只记改动，不复制整个系统）\n' "$(find "$UPPER" -type f 2>/dev/null | wc -l)"
+	echo
+	echo "想彻底丢掉所有改动、回到镜像原样："
+	echo "  sudo k50-image reset-upper   # 会删除整个可写层，务必先备份"
+}
+
+cmd_reset_upper() {
+	need_root reset-upper
+	is_bootstrap || die "不能在镜像模式下重置自己正在用的可写层（先在引导层/救援模式里做）"
+	[ -d "$UPPER" ] || { ok "可写层本来就没有"; return 0; }
+	read -r -p "确认删除 $UPPER 里的全部改动？输入 yes 继续： " a
+	[ "$a" = yes ] || die "已取消"
+	local bak
+	bak="$DATA/upper-backup-$(date -u '+%Y%m%d-%H%M%S')"
+	mv "$UPPER" "$bak"
+	mkdir -p "$UPPER" "$WORK"
+	ok "已重置（旧的可写层留在 $bak，确认没问题后可删）"
+}
+
+usage() {
+	cat <<EOF
+k50-image —— 镜像模式（只读系统层 + 可写 overlay）管理
+
+  status                     看当前状态（默认）
+  list                       列出本机镜像
+  install <文件|URL> [--sha256 H]   装入新镜像
+  activate <镜像>            下次启动切到这个镜像（原子操作）
+  rollback                   切回上一个镜像
+  enable / disable           打开/关闭镜像模式（下次重启生效）
+  prune [N]                  只保留最新 N 个镜像（默认 $KEEP_DEFAULT，被引用的不删）
+  diff [N]                   看可写层里改了哪些顶层目录
+  reset-upper                丢掉全部改动（只在引导层可用，先备份）
+
+  典型更新流程：
+    scp <新镜像>.squashfs k50:/tmp/
+    ssh k50 "sudo k50-image install /tmp/xxx.squashfs"
+    ssh k50 "sudo k50-image activate system-<时间戳> && sudo reboot"
+    起不来就： k50-image rollback && reboot（旧系统原封不动，数据一个字节没动）
+EOF
+}
+
+case "${1:-status}" in
+	status) cmd_status ;;
+	list) cmd_list ;;
+	install) shift; cmd_install "$@" ;;
+	activate) shift; cmd_activate "$@" ;;
+	rollback) cmd_rollback ;;
+	enable) cmd_enable ;;
+	disable) cmd_disable ;;
+	prune) shift; cmd_prune "$@" ;;
+	diff) shift; cmd_diff "$@" ;;
+	reset-upper) cmd_reset_upper ;;
+	-h | --help | help) usage ;;
+	*) usage; exit 1 ;;
+esac

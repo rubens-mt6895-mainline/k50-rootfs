@@ -1,0 +1,218 @@
+name: build-rootfs
+
+# ============================================================================
+#  从零构建 K50（rubens）用的 Debian rootfs 并发布
+#
+#  * 手动触发：Actions → build-rootfs → Run workflow（可选改 suite / 大小 / 是否发布）
+#  * 定时：每周一次（cron）
+#  * push：改了 overlay/ config/ scripts/ .github/ 就重建
+#
+#  产物（Release asset）：
+#    k50-rootfs-<suite>.img.zst      ext4 镜像，dd 到 userdata 分区
+#    k50-rootfs-<suite>.tar.zst      同内容 tar
+#    packages.txt / BUILD.txt / SHA256SUMS.txt
+#
+#  注意：默认跑在 arm64 runner 上（原生，不需要 qemu）。想用免费 x86 runner
+#  就把 runs-on 改成 ubuntu-24.04 并保留下面「qemu」那一步。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Debian 版本（trixie / bookworm）'
+        required: false
+        default: ''
+      image_size_gib:
+        description: '镜像初始大小 GiB（构建后会收缩）'
+        required: false
+        default: ''
+      extra_packages:
+        description: '额外包（逗号分隔）'
+        required: false
+        default: ''
+      publish:
+        description: '发布到 Release？'
+        required: false
+        type: boolean
+        default: true
+      runner:
+        description: '跑在哪个 runner 上（arm64 原生只对公开仓库免费；私有仓选 ubuntu-24.04 走 qemu）'
+        required: false
+        type: choice
+        options:
+          - ubuntu-24.04-arm
+          - ubuntu-24.04
+        default: 'ubuntu-24.04-arm'
+  schedule:
+    - cron: '23 19 * * 0'
+  push:
+    branches: ['main']
+    paths:
+      - 'config/**'
+      - 'overlay/**'
+      - 'scripts/**'
+      - '.github/workflows/build-rootfs.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rootfs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # 默认走 arm64 原生 runner（不需要 qemu）。私有仓库拿不到 ubuntu-24.04-arm 时，
+    # 手动 Run 时把 runner 选成 ubuntu-24.04，下面「装构建工具」那步会自己装 qemu/binfmt。
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 120
+
+    steps:
+      - name: 取仓库
+        uses: actions/checkout@v4
+
+      - name: 读取 config/config
+        id: cfg
+        run: |
+          set -euo pipefail
+          cfgval() { sed -n "s/^$1=//p" config/config | tail -1; }
+
+          SUITE="${{ inputs.suite }}";       [ -n "$SUITE" ]       || SUITE="$(cfgval suite)"
+          SIZE="${{ inputs.image_size_gib }}"; [ -n "$SIZE" ]       || SIZE="$(cfgval image_size_gib)"
+          EXTRA="${{ inputs.extra_packages }}"
+          KEEP="$(cfgval keep_releases)"
+          LABEL="$(cfgval image_label)"
+          MIRROR="$(cfgval mirror)"
+          SECMIRROR="$(cfgval security_mirror)"
+          COMPONENTS="$(cfgval components)"
+          SCOMP="$(cfgval squashfs_comp)"
+
+          {
+            echo "suite=$SUITE"
+            echo "size=$SIZE"
+            echo "extra=$EXTRA"
+            echo "keep=${KEEP:-8}"
+            echo "label=${LABEL:-k50rootfs}"
+            echo "mirror=$MIRROR"
+            echo "secmirror=$SECMIRROR"
+            echo "components=$COMPONENTS"
+            echo "scomp=${SCOMP:-gzip}"
+            echo "username=${{ github.repository_owner }}"
+          } >> "$GITHUB_OUTPUT"
+          echo "target: $SUITE / ${SIZE}GiB / $MIRROR"
+
+      - name: 腾磁盘
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
+
+      - name: 装构建工具
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # debian-archive-keyring 是必需的：mmdebstrap 用宿主机的 Debian 归档公钥
+          # 校验 Release 签名，而 ubuntu-24.04 runner 默认没有这把钥匙
+          # （不装会报 NO_PUBKEY 6ED0E7B82643E131，脚本的前置检查也会直接失败）。
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            mmdebstrap e2fsprogs rsync zstd tar coreutils squashfs-tools \
+            debian-archive-keyring qemu-user-static binfmt-support
+          # x86 runner 上需要有 qemu-aarch64 的 binfmt 注册
+          if [ "$(uname -m)" != aarch64 ]; then
+            ls /proc/sys/fs/binfmt_misc/qemu-aarch64
+          fi
+          mmdebstrap --version
+
+      - name: 构建 rootfs
+        env:
+          SUITE: ${{ steps.cfg.outputs.suite }}
+          MIRROR: ${{ steps.cfg.outputs.mirror }}
+          SECURITY_MIRROR: ${{ steps.cfg.outputs.secmirror }}
+          COMPONENTS: ${{ steps.cfg.outputs.components }}
+          SQUASHFS_COMP: ${{ steps.cfg.outputs.scomp }}
+          IMAGE_SIZE_GIB: ${{ steps.cfg.outputs.size }}
+          IMG_LABEL: ${{ steps.cfg.outputs.label }}
+          EXTRA_PACKAGES: ${{ steps.cfg.outputs.extra }}
+          WORK: ${{ github.workspace }}/work
+        run: |
+          set -euo pipefail
+          sudo -E bash scripts/build-rootfs.sh
+          sudo chown -R "$(id -u):$(id -g)" work/out
+
+      - name: 组装产物
+        run: |
+          set -euo pipefail
+          SHORT="$(git rev-parse --short=12 HEAD)"
+          TAG="ci-$(date -u +%Y%m%d-%H%M%S-UTC)"
+          echo "SHORT=$SHORT" >> "$GITHUB_ENV"
+          echo "TAG=$TAG"     >> "$GITHUB_ENV"
+
+          mkdir -p dist
+          cp work/out/k50-rootfs-*.img.zst      dist/
+          cp work/out/k50-rootfs-*.tar.zst      dist/
+          cp work/out/k50-rootfs-*.squashfs     dist/ 2>/dev/null || true
+          cp work/out/packages.txt           dist/
+          cp work/out/SHA256SUMS.txt         dist/
+
+          {
+            cat work/out/BUILD.txt
+            echo
+            echo "commit      : $SHORT (${{ github.ref_name }})"
+            echo "tag         : $TAG"
+            echo "workflow    : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "烧写（设备上，root）："
+            echo "  zstd -d k50-rootfs-${{ steps.cfg.outputs.suite }}.img.zst -c | dd of=/dev/sdc86 bs=4M oflag=direct status=progress"
+            echo "  重启后：resize2fs /dev/sdc86"
+            echo
+            echo "注意：rootfs 里没有厂商固件（WiFi/BT/触摸），按 docs/FLASH.md 从你自己的设备拷进 /lib/firmware。"
+          } >> dist/BUILD.txt
+
+          ( cd dist && sha256sum *.img.zst *.tar.zst packages.txt > SHA256SUMS.txt )
+          ls -lh dist
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: k50-rootfs-${{ steps.cfg.outputs.suite }}-${{ env.SHORT }}
+          path: dist/*
+          retention-days: 7
+          compression-level: 0
+
+      - name: 发布 Release
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "k50-rootfs ${{ steps.cfg.outputs.suite }} (${{ env.SHORT }})"
+          prerelease: true
+          make_latest: false
+          body: |
+            Debian ${{ steps.cfg.outputs.suite }} rootfs for Xiaomi Redmi K50 (rubens)
+
+            * commit: `${{ env.SHORT }}`
+            * 自动构建：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            * 烧写方式见 `BUILD.txt` 与仓库 `docs/FLASH.md`
+            * 镜像里的包清单见 `packages.txt`
+          files: dist/*
+
+      - name: 清理旧 Release
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ steps.cfg.outputs.keep }}
+        run: |
+          set -euo pipefail
+          gh release list --limit 100 --json tagName,createdAt,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | select(.tagName | startswith("ci-")) | .tagName' \
+            > /tmp/ci-tags.txt || true
+          N="$(wc -l < /tmp/ci-tags.txt)"
+          echo "现存 ci- 预发布：$N 个，保留 $KEEP"
+          [ "$N" -gt "$KEEP" ] || exit 0
+          tail -n +$((KEEP + 1)) /tmp/ci-tags.txt | while read -r t; do
+            [ -n "$t" ] || continue
+            echo "删除 $t"
+            gh release delete "$t" --yes --cleanup-tag || true
+          done

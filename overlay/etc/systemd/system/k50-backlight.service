@@ -1,0 +1,17 @@
+[Unit]
+Description=K50 panel brightness bridge (k50_bl module -> /sys/class/backlight/l11a)
+Documentation=file:///usr/local/lib/k50/README.txt
+# 必须在 GNOME 会话（gsd-power）启动前把背光设备注册好，
+# gsd-power 只在启动时枚举 /sys/class/backlight，晚于它会看不到亮度滑块。
+Before=graphical.target
+After=systemd-modules-load.service
+ConditionPathExists=/usr/local/lib/k50/k50_bl.ko
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'if [ -e /sys/class/backlight/l11a ]; then echo "already registered"; exit 0; fi; /sbin/modprobe -q k50_bl 2>/dev/null || /sbin/insmod /usr/local/lib/k50/k50_bl.ko'
+ExecStartPost=-/bin/sh -c 'sleep 0.3; test -e /sys/class/backlight/l11a || echo "WARN: /sys/class/backlight/l11a missing"'
+
+[Install]
+WantedBy=multi-user.target

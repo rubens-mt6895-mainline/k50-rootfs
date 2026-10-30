@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconnect paired Bluetooth HID devices (Pebble mouse / K580 keyboard)
+After=bluetooth.service k50-bt-agent.service
+Wants=bluetooth.service k50-bt-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/k50-bt-reconnect.py
+TimeoutStartSec=180
+Nice=10

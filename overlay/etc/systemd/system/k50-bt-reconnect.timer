@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconnect paired Bluetooth HID devices
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=k50-bt-reconnect.service
+
+[Install]
+WantedBy=timers.target

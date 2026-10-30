@@ -1,0 +1,14 @@
+[Unit]
+Description=K50 Bluetooth pairing agent (auto-accept, NoInputNoOutput)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/sbin/bt_agent.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

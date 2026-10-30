@@ -1,0 +1,147 @@
+#!/bin/sh
+# ==============================================================================
+#  K50 镜像模式引导 —— 替换 /sbin/init 的那一层
+#
+#  正常启动流程：
+#    内核 root=/dev/sdc86(ext4) → 跑本脚本 →
+#      挂 /images/system-current.squashfs（只读） +
+#      overlay 可写层 /data/upper →
+#      pivot_root 进新根 → 交给真正的 systemd
+#
+#  安全设计（重要）：
+#    * 只有在「开关文件 /images/enabled 存在」且「/images/system-current 存在」时才进镜像模式；
+#    * 任何一步失败 → 直接 exec 原来的 systemd，系统照常起来（最坏情况是"更新没生效"）；
+#    * 检测到根已经是 overlay（说明已经在新系统里）→ 立刻 exec systemd，绝不递归；
+#    * 用 pivot_root 而不是 switch_root：switch_root 会删旧根里的文件，
+#      而 /images、/data 就在旧根上，绝不能让它碰。
+# ==============================================================================
+
+set -u
+
+# 内核 exec 本脚本时环境是空的（没有 PATH），必须自己补，否则 command -v 全都会失败
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+REAL_INIT=/usr/lib/systemd/systemd
+IMAGES=/images
+DATA=/data
+MARKER="$IMAGES/enabled"
+CURRENT="$IMAGES/system-current"
+RO_MNT=/var/lib/k50/ro
+NEW_MNT=/var/lib/k50/new
+# 日志写到 /data（在 ext4 引导层上，pivot 之后也照样能读到）；没有 /data 就退回 /var/log
+if [ -d /data ]; then LOG=/data/k50-image-init.log; else LOG=/var/log/k50-image-init.log; fi
+
+say() { printf 'k50-image-init: %s\n' "$*"; }
+logline() { say "$*"; printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$LOG" 2>/dev/null || true; }
+
+cleanup() {
+	# 回落前尽量把挂的东西收干净，免得引导层留下半吊子挂载点
+	if [ -n "${LOOP:-}" ]; then
+		mountpoint -q "$RO_MNT" && umount -l "$RO_MNT" 2>/dev/null
+		losetup -d "$LOOP" 2>/dev/null
+	fi
+	mountpoint -q "$NEW_MNT" && umount -l "$NEW_MNT" 2>/dev/null
+	mountpoint -q "$RO_MNT" && umount -l "$RO_MNT" 2>/dev/null
+	return 0
+}
+
+fallback() {
+	logline "降级到普通启动：$1"
+	cleanup
+	exec "$REAL_INIT"
+}
+
+logline "启动检查（root=$(cat /proc/cmdline 2>/dev/null)）"
+
+# /proc /sys 是内核交给 init 时唯一没挂的两个（/dev 由 devtmpfs 自动挂）
+mountpoint -q /proc || mount -t proc proc /proc 2>/dev/null || true
+mountpoint -q /sys || mount -t sysfs sysfs /sys 2>/dev/null || true
+
+# 已经在镜像模式的新根里跑了？→ 直接交 systemd
+if grep -q ' / overlay ' /proc/mounts 2>/dev/null; then
+	exec "$REAL_INIT"
+fi
+
+[ -x "$REAL_INIT" ] || fallback "找不到 $REAL_INIT"
+[ -e "$MARKER" ] || fallback "镜像模式未启用（没有 $MARKER）"
+[ -e "$CURRENT" ] || fallback "没有当前镜像（$CURRENT）"
+[ -d "$DATA/upper" ] || fallback "可写层不存在（$DATA/upper）"
+command -v losetup >/dev/null 2>&1 || fallback "没有 losetup"
+command -v pivot_root >/dev/null 2>&1 || fallback "没有 pivot_root"
+
+mkdir -p "$RO_MNT" "$NEW_MNT" || fallback "建不了挂载点"
+mountpoint -q "$RO_MNT" && umount -l "$RO_MNT" 2>/dev/null
+mountpoint -q "$NEW_MNT" && umount -l "$NEW_MNT" 2>/dev/null
+
+LOOP="$(losetup -f --show -r "$CURRENT" 2>/dev/null)" || fallback "losetup 失败（$CURRENT）"
+[ -n "$LOOP" ] || fallback "losetup 没给出 loop 设备"
+logline "镜像 $CURRENT → $LOOP"
+
+mount -t squashfs -o ro "$LOOP" "$RO_MNT" 2>/dev/null || fallback "挂 squashfs 失败"
+# index=off 必须要有：overlayfs 默认会去校验「upper 根的 origin」是否等于当前 lower 根，
+# 我们在换镜像时 lower 变了，校验失败 → mount 直接报 Stale file handle 挂不上。
+# （实测：换 lower 后不带 index=off 时 rc=32，dmesg 里是 "failed to verify upper root origin"）
+mount -t overlay overlay \
+	-o "lowerdir=$RO_MNT,upperdir=$DATA/upper,workdir=$DATA/work,index=off" "$NEW_MNT" 2>/dev/null ||
+	fallback "挂 overlay 失败"
+
+# 新根里检查几个"起不来就完了"的路径
+for f in /usr/lib/systemd/systemd /sbin/init /usr/bin/mount /etc/fstab; do
+	[ -e "$NEW_MNT$f" ] || fallback "新根里缺 $f"
+done
+
+# 厂商固件补齐：CI 打出来的镜像里没有 soc7_0_ram_*.bin / WIFI_RAM_CODE_* 这类
+# 小米/MTK 二进制（版权原因不进仓库）。它们放在 $DATA/firmware（启用时从引导层拷过来），
+# 这里把它叠在系统层**之上**：/data 优先，镜像里的 Debian 固件兜底。
+# 这样换系统镜像不会把 WiFi/蓝牙/触摸固件弄丢。
+if [ -d "$DATA/firmware" ] && [ -d "$NEW_MNT/usr/lib/firmware" ]; then
+	mkdir -p "$DATA/fw-up" "$DATA/fw-wk"
+	mount -t overlay overlay \
+		-o "lowerdir=$DATA/firmware:$NEW_MNT/usr/lib/firmware,upperdir=$DATA/fw-up,workdir=$DATA/fw-wk,index=off" \
+		"$NEW_MNT/usr/lib/firmware" 2>/dev/null ||
+		logline "警告：固件叠加层挂载失败（WiFi/蓝牙/触摸固件可能缺失）"
+fi
+
+# 让新系统里 /images、/data 与引导层是同一份（路径不变，k50-image 两边都能用）
+mkdir -p "$NEW_MNT/images" "$NEW_MNT/data"
+mount --bind "$IMAGES" "$NEW_MNT/images" 2>/dev/null || fallback "bind /images 失败"
+mount --bind "$DATA" "$NEW_MNT/data" 2>/dev/null || fallback "bind /data 失败"
+
+# 镜像模式专用的 fstab（去掉根分区那一行），免得 systemd 再去挂已被 overlay 占用的 /
+if [ -e "$DATA/fstab.image" ]; then
+	mount --bind "$DATA/fstab.image" "$NEW_MNT/etc/fstab" 2>/dev/null ||
+		logline "警告：fstab 覆盖失败，systemd 可能会尝试挂 LABEL=k50rootfs"
+fi
+
+# SSH 主机密钥：新镜像里没有 /etc/ssh/ssh_host_*（构建时故意删掉），sshd 缺了会
+# 直接退出（"no hostkeys available -- exiting"，表现为 SSH 能连上但立刻断开）。
+# 启用镜像模式时已把密钥存到 $DATA/persist/etc-ssh，这里先恢复进新根；
+# 万一没存过，k50-ssh-keys.service 还会在 sshd 之前再兜一次（ssh-keygen -A）。
+if [ -d "$DATA/persist/etc-ssh" ]; then
+	NEW_KEYS=0
+	for k in "$DATA"/persist/etc-ssh/ssh_host_*; do
+		[ -e "$k" ] || continue
+		case "$k" in *.pub) continue ;; esac
+		mkdir -p "$NEW_MNT/etc/ssh"
+		if cp -f "$k" "$NEW_MNT/etc/ssh/$(basename "$k")" 2>/dev/null; then
+			chmod 600 "$NEW_MNT/etc/ssh/$(basename "$k")" 2>/dev/null || true
+			NEW_KEYS=$((NEW_KEYS + 1))
+		fi
+	done
+	logline "已把 $NEW_KEYS 个 SSH 主机密钥恢复进新根"
+fi
+
+mkdir -p "$NEW_MNT/mnt/.oldroot"
+
+# API 文件系统搬进新根
+mount --move /dev "$NEW_MNT/dev" 2>/dev/null || true
+mount --move /proc "$NEW_MNT/proc" 2>/dev/null || true
+mount --move /sys "$NEW_MNT/sys" 2>/dev/null || true
+
+cd "$NEW_MNT" || fallback "cd 新根失败"
+logline "pivot_root → 新根（可写层 $DATA/upper）"
+pivot_root . mnt/.oldroot 2>/dev/null || fallback "pivot_root 失败"
+
+logline "交给 systemd"
+exec chroot . /sbin/init

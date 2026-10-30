@@ -1,0 +1,22 @@
+# ============================================================
+#  K50 的 GNOME 系统级默认值（对所有用户生效，用户仍可在设置里覆盖）
+#  改完必须重新编译：dconf update（构建脚本会自动跑）
+# ============================================================
+
+# 空闲熄屏 15 分钟（0 = 永不；单位秒）
+[org/gnome/desktop/session]
+idle-delay=uint32 900
+
+# 省电：不用时关屏
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='blank'
+sleep-inactive-battery-type='blank'
+
+# 触屏设备：屏幕键盘（shell 自带 OSK，由 osk-tweak 扩展调尺寸）
+[org/gnome/desktop/a11y/applications]
+screen-keyboard-enabled=true
+
+# 触屏：一直显示滚动条 / 文件管理器单击打开更顺手
+[org/gnome/desktop/interface]
+enable-animations=true
+clock-show-seconds=true

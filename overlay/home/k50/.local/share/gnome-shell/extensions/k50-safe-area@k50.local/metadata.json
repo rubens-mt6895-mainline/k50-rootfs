@@ -1,0 +1,7 @@
+{
+  "name": "K50 Safe Area",
+  "description": "给顶栏和软键盘加安全边距，避免被机身圆角/曲面切掉。",
+  "uuid": "k50-safe-area@k50.local",
+  "shell-version": ["48"],
+  "version": 1
+}

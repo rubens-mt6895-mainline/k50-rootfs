@@ -1,0 +1,16 @@
+[Unit]
+Description=K50 SSH key hygiene (host keys + authorized_keys, survives image swaps)
+Documentation=file:///usr/local/lib/k50/README.txt
+# sshd 缺主机密钥会直接退出，所以必须赶在 ssh.service 之前把密钥准备好。
+# 脚本本身幂等：有密钥就只做持久化备份，没有就生成。
+Before=ssh.service ssh.socket
+After=local-fs.target
+ConditionPathIsDirectory=/etc/ssh
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/k50-ssh-keys.sh
+
+[Install]
+WantedBy=multi-user.target

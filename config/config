@@ -1,0 +1,38 @@
+# ============================================================
+#  k50-rootfs 构建配置
+#  改这个文件 → push 到自己的 fork → Actions 重新构建
+# ============================================================
+
+# ── Debian 版本与源 ─────────────────────────────────────────
+# trixie = Debian 13（当前设备在跑的），bookworm = 12
+suite=trixie
+mirror=https://mirrors.aliyun.com/debian
+security_mirror=https://security.debian.org/debian-security
+components=main contrib non-free non-free-firmware
+
+# ── 镜像 ───────────────────────────────────────────────────
+# 初始镜像大小（GiB）。构建时会 resize2fs -M 收缩到实际大小，
+# 刷到 userdata(225 GiB) 后进系统 `resize2fs /dev/sdc86` 再扩回来。
+image_size_gib=8
+# ext4 卷标，必须与 overlay 里 /etc/fstab 的 LABEL= 一致
+image_label=k50rootfs
+
+# ── 系统 ───────────────────────────────────────────────────
+hostname=k50-linux
+username=k50
+# 首次登录请立刻 passwd 改掉
+password=k50
+timezone=Asia/Shanghai
+# 额外包，逗号分隔（会追加到 config/packages.list 之后）
+extra_packages=
+
+# ── Release ────────────────────────────────────────────────
+# ci-* 标签保留几个
+keep_releases=8
+
+# ── 镜像模式（squashfs 系统层）────────────────────────────────
+# 压缩算法必须和内核里的 CONFIG_SQUASHFS_* 对得上。默认 gzip：任何内核都支持。
+# 当前设备内核只编进了 gzip（xz/lzo/zstd 都没有），用 zstd 打出来的镜像挂不上。
+# 想更小/更快：内核加 CONFIG_SQUASHFS_ZSTD=y 重编（k50-boot 那个仓的 defconfig），
+# 再把这里改成 zstd。
+squashfs_comp=gzip

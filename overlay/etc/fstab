@@ -1,0 +1,2 @@
+# <file system>  <mount point> <type> <options>  <dump> <pass>
+LABEL=k50rootfs   /   ext4   errors=remount-ro,noatime   0   1

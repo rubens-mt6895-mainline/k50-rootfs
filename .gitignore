@@ -1,0 +1,13 @@
+# 构建产物
+work/
+*.img
+*.img.zst
+*.tar.zst
+*.raw
+
+# 从设备拷出来的厂商文件（自己用，不要提交）
+work/extra/
+
+# python
+__pycache__/
+*.pyc

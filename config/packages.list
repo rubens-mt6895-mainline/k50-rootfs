@@ -1,0 +1,96 @@
+# ============================================================
+#  k50-rootfs 要装的包（一行一个，# 注释）
+#  这些会一次交给 apt 安装；写错包名会让构建在这一步失败并给出 apt 的报错。
+#  想追加自己的：用 config/config 里的 extra_packages，或直接往这里加。
+# ============================================================
+
+# ---- 基础系统 ----
+systemd
+systemd-timesyncd
+sudo
+locales
+tzdata
+kmod
+e2fsprogs
+dosfstools
+zstd
+xz-utils
+rsync
+curl
+wget
+ca-certificates
+gnupg
+less
+nano
+vim-tiny
+htop
+jq
+pciutils
+usbutils
+rfkill
+iw
+evtest
+i2c-tools
+alsa-utils
+python3
+python3-dbus
+python3-gi
+python3-venv
+git
+
+# ---- 远程访问 ----
+openssh-server
+# 客户端也要：k50-ssh-keys.sh 在镜像里重建主机密钥要用 ssh-keygen，
+# 平时也直接用 ssh / scp / ssh-copy-id
+openssh-client
+
+# ---- 网络与蓝牙 ----
+network-manager
+wpasupplicant
+bluez
+# WiFi 管制域数据库（regulatory.db；不给的话 iw/NM 会抱怨 regdomain）
+wireless-regdb
+
+# ---- 桌面（GNOME 48 / Wayland）----
+gnome-core
+gdm3
+gnome-terminal
+nautilus
+gnome-control-center
+gnome-tweaks
+gnome-shell-extension-manager
+gnome-disk-utility
+gnome-system-monitor
+gnome-calculator
+gnome-text-editor
+xwayland
+pipewire
+pipewire-audio
+pipewire-pulse
+wireplumber
+libspa-0.2-bluetooth
+fonts-noto-cjk
+fonts-noto-color-emoji
+fonts-dejavu-core
+
+# ---- 常用小工具 ----
+file-roller
+eog
+evince
+picocom
+minicom
+
+# ---- K50 专属（无 RTC / GNOME 默认值）----
+# K50 没有 RTC：fake-hwclock 关机存时间、开机恢复，避免开机就时间乱飞导致 apt HTTPS 证书报错
+fake-hwclock
+# 编译 overlay 里的 dconf 默认值要用 dconf 命令（dconf update）
+dconf-cli
+# 镜像模式（只读系统层 + 可写 overlay）要用 mksquashfs 打系统层、losetup 挂载
+squashfs-tools
+
+# ---- 说明 ----
+# 下面这些**不在**包里，因为都不是 Debian 能提供的：
+#   * 面板/触摸/蓝牙/WiFi 固件（soc7_0_ram_*.bin、WIFI_RAM_CODE_*.bin、
+#     st_fts_L11a.ftb、mediatek/mt6895/BT_Addr …）→ 从你自己设备上拷，
+#     见 docs/FLASH.md 的「厂商固件」一节
+#   * 相机 / 指纹 / 基带的内核模块 → k50-boot 或各自的项目仓库

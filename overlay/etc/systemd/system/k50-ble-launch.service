@@ -1,0 +1,11 @@
+[Unit]
+Description=Launch K50 Bluetooth LE recovery worker
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/k50-ble-launch.sh
+
+[Install]
+WantedBy=bluetooth.target
