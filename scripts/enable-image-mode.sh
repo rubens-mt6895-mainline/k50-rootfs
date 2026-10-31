@@ -77,7 +77,7 @@ if [ "$REVERT" = 1 ]; then
 		rm -f "$REAL_INIT"
 		dpkg-divert --remove --rename "$REAL_INIT"
 		ok "$REAL_INIT 已还原（dpkg-divert 撤掉）"
-	elif dpkg-divert --list "$REAL_INIT" 2>/dev/null | grep -q .; then
+	elif dpkg-divert --list "$REAL_INIT" 2>/dev/null | grep -c . >/dev/null; then
 		rm -f "$REAL_INIT"
 		dpkg-divert --remove --rename "$REAL_INIT"
 		ok "$REAL_INIT 已还原"
@@ -264,7 +264,7 @@ step 5 "把 /sbin/init 换成 pivot（这一步在自检之后）"
 if [ "$DRY_RUN" = 1 ]; then
 	# dry-run 绝不动 /sbin/init：pivot 的语法已经在 2b 校验过了
 	ok "--dry-run：不装 divert，/sbin/init 保持原样"
-elif [ -e "$DIVERTED" ] || dpkg-divert --list "$REAL_INIT" 2>/dev/null | grep -q .; then
+elif [ -e "$DIVERTED" ] || dpkg-divert --list "$REAL_INIT" 2>/dev/null | grep -c . >/dev/null; then
 	ok "$REAL_INIT 已经被 divert 过了（重装脚本，不重复 divert）"
 elif [ -e "$REAL_INIT" ]; then
 	cp -a "$REAL_INIT" "$REAL_INIT.k50-bak.$(date -u '+%Y%m%d-%H%M%S')" 2>/dev/null || true

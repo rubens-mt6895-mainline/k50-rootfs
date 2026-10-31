@@ -34,7 +34,7 @@ is_bootstrap() {
 
 running_image() {
 	# 从挂载参数里抓出 lowerdir 的镜像名
-	sed -n 's|^overlay / overlay .*lowerdir=\([^,]*\).*|\1|p' /proc/mounts 2>/dev/null | head -1
+	awk '/^overlay \/ overlay /{ if (match($0, /lowerdir=[^,]*/)) { print substr($0, RSTART+9, RLENGTH-9); exit } }' /proc/mounts 2>/dev/null
 }
 
 sha_of() { sha256sum "$1" | awk '{print $1}'; }
@@ -45,7 +45,15 @@ sha_of() { sha256sum "$1" | awk '{print $1}'; }
 # 返回 0=有  1=明确没有  2=无法判断（没有 unsquashfs）
 image_has_tools() {
 	command -v unsquashfs >/dev/null 2>&1 || return 2
-	unsquashfs -l "$1" 2>/dev/null | grep -qE '/usr/local/sbin/k50-image$' && return 0
+	# 注意：这里**不能**写 `unsquashfs -l | grep -q`。本脚本开着 pipefail，
+	# grep 一旦命中就退出，unsquashfs 收到 SIGPIPE（rc=141），整条管道被判失败，
+	# 于是镜像里明明有 k50-image 却返回 1 —— 2026-10-31 真机就是这么被卡住的。
+	# 改为先把清单读进变量再判断，没有管道、没有 SIGPIPE。
+	local listing
+	listing="$(unsquashfs -l "$1" 2>/dev/null || true)"
+	case "$listing" in
+	*"usr/local/sbin/k50-image"*) return 0 ;;
+	esac
 	return 1
 }
 
@@ -281,7 +289,7 @@ cmd_diff() {
 	local top="${1:-30}"
 	[ -d "$UPPER" ] || die "可写层不存在：$UPPER"
 	echo "改动过的顶层目录（按占用排序，最多 $top 条）："
-	du -sh "$UPPER"/* 2>/dev/null | sort -rh | head -n "$top"
+	du -sh "$UPPER"/* 2>/dev/null | sort -rh | sed -n "1,${top}p"
 	echo
 	printf '改动文件数：%s（overlay 只记改动，不复制整个系统）\n' "$(find "$UPPER" -type f 2>/dev/null | wc -l)"
 	echo

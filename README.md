@@ -253,3 +253,18 @@ rootfs 里 chroot 逐项跑过**（六种情形全绿），不是纸面推导。
 * 本仓库的脚本、配置、overlay 文件：**MIT**（见 [LICENSE](LICENSE)）。
 * 装进镜像的 Debian 软件包：各自许可证，见 `packages.txt` 与各包的版权文件。
 * 厂商固件、厂商内核模块：**不在本仓库**，也不随 Release 分发。
+
+## 八、还有一个坑：`set -euo pipefail` 会让 `grep -q` / `head -1` 假失败
+
+镜像模式工具里曾出现「镜像里明明有 `k50-image`，却被判定成没有工具、`activate` 拒绝切换」。
+原因是 `set -euo pipefail` 下 `unsquashfs -l … | grep -q …` 的 `grep` 命中即退出，
+上游 `unsquashfs` 收到 SIGPIPE（`rc=141`），整条管道被判失败。
+
+写脚本时请按这条规则来：
+
+- `| grep -q X` → `| grep -c X >/dev/null`
+- `| head -1` / `| head -n1` → `| sed -n '1p'`
+- `| head -n N` → `| sed -n "1,${N}p"`
+- 要「第一个匹配行」→ 单个 `awk`（一个进程，没有管道）
+
+详见 `docs/UPDATE.md` §11。

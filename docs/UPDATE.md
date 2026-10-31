@@ -312,3 +312,48 @@ sudo k50-image activate system-<那个时间戳> && sudo reboot
   `k50-ssh-keys` 那套机制是给"从零构建、不带主机密钥"的镜像兜底的。
 * 快照体积 ≈ 系统实际占用再压一把（本机 3.5 GB `/usr` → 约 1.3 GB 镜像），
   `/images` 空间不够时先 `k50-image prune`。
+
+## 11. 2026-10-31 真机正面验证「更新不换机」+ 一个 pipefail 陷阱
+
+### 11.1 正面验证：换成**自己系统**的快照
+
+过去换镜像是把「从零 debootstrap 的干净系统」当 lower，等价于换机。现在用
+`k50-image snapshot` 从正在运行的系统打镜像，再换上去：
+
+| 指标 | 快照前 | 换成自拍快照 + 重启后 |
+|---|---|---|
+| 已装包数 | 1123 | 1123 |
+| 主机名 | k50-linux | k50-linux |
+| NetworkManager 连接 | Hotspot / tenda-5 | 同 |
+| root 密码哈希前缀 | `$6$Fk7TsyxD…` | 同 |
+| `/home/k50` 条目数 | 23 | 23 |
+| 桌面应用数 | 81 | 81 |
+| 可写层 `/data/upper` | 1.2 GiB | 1.2 GiB |
+| gdm / bluetooth / k50-* 服务 | 全 active | 全 active |
+
+对照：换成干净镜像（`system-20261030-185731`）时包数是 **1395**、密码与家目录全变 ——
+那就是 10-30 那次「数据没了」的真实表现。
+
+### 11.2 陷阱：`set -euo pipefail` + `| grep -q` / `| head -1`
+
+`k50-image` 的 `image_has_tools()` 原本写：
+
+```bash
+unsquashfs -l "$1" 2>/dev/null | grep -qE '/usr/local/sbin/k50-image$' && return 0
+```
+
+`grep` 一命中就退出，`unsquashfs` 收到 **SIGPIPE（rc=141）**，`pipefail` 把整条管道判成
+失败 → **镜像里明明带着 k50-image，却被判成「没有工具」，`activate` 拒绝切换**。
+真机复现：`bash -c 'set -o pipefail; unsquashfs -l img | grep -q X; echo $?'` → `141`；
+去掉 pipefail → `0`；改用 `grep -c X >/dev/null` → `0`。
+
+统一改法（仓库内已全改）：
+
+- `| grep -q X` → `| grep -c X >/dev/null`（读完再判）
+- `| head -1` / `| head -n1` → `| sed -n '1p'`（读完再取）
+- `| head -n N` → `| sed -n "1,${N}p"`
+- 要「第一个匹配行」→ 用单个 `awk`（一个进程，没有管道）
+
+> 更正一条旧记录：此前写的「`activate` 会拒绝没有工具的镜像，真机实测 rc=1」其实是这个
+> bug 造成的**假拒绝**（对任何镜像都拒）。修复后重新验证：无工具镜像 `185731` → `rc=1`
+> 拒绝且 `system-current` 未动；自拍快照 → `rc=0` 正常切换。

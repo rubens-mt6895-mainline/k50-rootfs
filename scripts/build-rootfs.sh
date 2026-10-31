@@ -341,7 +341,7 @@ log "写 BUILD.txt / SHA256SUMS.txt"
 	echo "img.zst     : $ZS ($(numfmt --to=iec "$ZS" 2>/dev/null || echo 0))"
 	echo "squashfs    : $SS ($(numfmt --to=iec "$SS" 2>/dev/null || echo 0))"
 	echo "packages    : $(wc -l <"$OUT/packages.txt")"
-	echo "host        : $(uname -srm) / $(command -v mmdebstrap >/dev/null && mmdebstrap --version | head -1)"
+	echo "host        : $(uname -srm) / $(command -v mmdebstrap >/dev/null && mmdebstrap --version 2>/dev/null | sed -n '1p')"
 	echo
 	echo "刷机：把 .img.zst 解压后 dd 到 userdata（K50 上是 /dev/sdc86），"
 	echo "     开机进系统后 resize2fs /dev/sdc86 扩满分区。详见 docs/FLASH.md"
