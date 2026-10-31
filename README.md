@@ -100,6 +100,7 @@ scripts/enable-image-mode.sh  在设备上一次性启用镜像模式（含 --dr
 .github/workflows/       定时/手动构建 + 发布 Release
 docs/FLASH.md            刷机、回滚、厂商固件说明
 docs/UPDATE.md           镜像模式（换系统不丢数据）的原理与用法
+docs/OVERLAY.md          overlay/ 里放了什么、为什么有些东西不在里面
 ```
 
 构建流程：`mmdebstrap` 装出最小系统 → chroot 里配主机名/用户/时区/locale/服务 → 复制 `overlay/`
@@ -197,6 +198,18 @@ sudo ./scripts/enable-image-mode.sh --revert        # 彻底撤掉（还原 /sbi
   现在由 `usr/local/sbin/k50-ssh-keys.sh`（`k50-ssh-keys.service`，排在 `ssh.service` 之前）
   负责恢复/生成，主机密钥和 `authorized_keys` 都持久化在 `/data/persist/`，
   由 `enable-image-mode.sh` 在启用时存一份、`pivot` 在开机时先恢复一遍。
+* 从 **NTFS/drvfs** 上克隆的仓库里，每个文件的权限都是 `0777`、属主是构建用户，
+  `cp -a overlay/. $ROOT/` 会把这个状态原样装进系统（`/usr/local/sbin/*.sh` 变成
+  `-rwxrwxrwx luis luis`）。`build-rootfs.sh` 现在会在拷完 overlay 后做一次归一化：
+  `/etc`、`/usr/local` 一律 `root:root`，先全设 `0644`，再把 `*.sh`/`*.py`/`k50-image`/`pivot`
+  显式设回 `0755`；`/home/k50` 设成 `1000:1000` + `0755`/`0644`。
+  在 GitHub Actions 的 ext4 上本来就没这问题，但本地跑能少一层意外。
+* `cp -a dir/.` 会把 **`dir` 自身的属主与权限也盖到目标目录上**：overlay 里有 `usr/`、`home/`、
+  `etc/`，所以 `/usr`、`/home`、`/` 会被一起改成 `0777 luis`（等于"根目录世界可写"）。
+  `build-rootfs.sh` 现在按 overlay 的目录清单逐个把它们纠正回 `root:root 0755`。
+  排查办法：`unsquashfs -ll 镜像 | grep -v '^l' | grep rwxrwxrwx`。
+* `overlay/README.md` 曾经被 `cp -a` 装成系统根目录的 `/README.md`（overlay 是"原样覆盖到 `/`"）。
+  说明文档现已移到 `docs/OVERLAY.md`，`overlay/` 里只放真正要进系统的文件。
   万一碰上没有这套机制的老镜像，进去以后手动跑：
   `sudo ssh-keygen -A && sudo systemctl restart ssh`。
 * `k50-ssh-keys.sh` 判断"是不是镜像模式"**不能用 `mountpoint -q /data`**：它依赖

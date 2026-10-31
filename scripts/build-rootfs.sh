@@ -179,6 +179,17 @@ ln -sf /usr/lib/systemd/system/gdm.service "$ROOT/etc/systemd/system/display-man
 # ── 4. overlay（K50 专属文件）────────────────────────────────────────────────
 log "复制 overlay/"
 cp -a "$REPO/overlay/." "$ROOT/"
+# cp -a "dir/." 会把 dir 里每个目录（包括 dir 自身）的属主与权限一块盖到目标上 ——
+# 在 NTFS/drvfs 上就是 777 + 构建用户，落到镜像里等于 / 与 /usr 世界可写。
+# 这里按 overlay 的目录清单逐个纠正（/home/<user> 稍后单独改成 1000:1000）。
+(cd "$REPO/overlay" && find . -type d -exec sh -c '
+	for d in "$@"; do
+		t="$0/${d#./}"
+		if [ -d "$t" ]; then
+			chown root:root "$t" 2>/dev/null || true
+			chmod 0755 "$t" 2>/dev/null || true
+		fi
+	done' "$ROOT" {} + )
 
 if [ -d "$EXTRA_DIR" ]; then
 	log "合并 $EXTRA_DIR（厂商固件等本地产物，不进 git）"
@@ -190,8 +201,23 @@ fi
 # fstab 的卷标必须与真实 mkfs 的标签一致
 sed -i "s|^LABEL=[^[:space:]]*|LABEL=$IMG_LABEL|" "$ROOT/etc/fstab"
 
-chmod +x "$ROOT"/usr/local/sbin/*.sh "$ROOT"/usr/local/sbin/*.py 2>/dev/null || true
-[ -d "$ROOT/home/$USERNAME" ] && chown -R 1000:1000 "$ROOT/home/$USERNAME"
+# overlay 里的文件是 cp -a 拷进来的：如果仓库克隆在 NTFS/drvfs 上（Windows 侧），
+# 每个文件都是 0777 且属主是构建用户 —— 直接 cp -a 会把 777、非 root 属主装进系统。
+# 这里统一归一化：/etc 与 /usr/local 一律 root:root；先全设 0644，再把要执行的文件设回 0755。
+chown -R root:root "$ROOT/etc" "$ROOT/usr/local" 2>/dev/null || true
+find "$ROOT/etc" "$ROOT/usr/local" -type f -exec chmod 0644 {} + 2>/dev/null || true
+find "$ROOT/etc" "$ROOT/usr/local" -type d -exec chmod 0755 {} + 2>/dev/null || true
+chmod 0755 "$ROOT"/usr/local/sbin/*.sh "$ROOT"/usr/local/sbin/*.py 2>/dev/null || true
+# 无扩展名的可执行文件单独点名（chmod 0644 那一轮会把它们清掉）
+for f in "$ROOT/usr/local/sbin/k50-image" "$ROOT/usr/local/lib/k50/pivot"; do
+	[ -f "$f" ] && chmod 0755 "$f"
+done
+[ -d "$ROOT/home/$USERNAME" ] && {
+	chown -R 1000:1000 "$ROOT/home/$USERNAME"
+	# 同理：overlay 里带来的用户文件在 drvfs 上也是 777
+	find "$ROOT/home/$USERNAME" -type d -exec chmod 0755 {} + 2>/dev/null || true
+	find "$ROOT/home/$USERNAME" -type f -exec chmod 0644 {} + 2>/dev/null || true
+}
 
 # ── 4b. image-mode 工具也要进镜像 ────────────────────────────────────────────
 # 教训（2026-10-31 真机事故）：镜像里如果没有 k50-image/pivot，一旦把它当 lower 换上，
