@@ -154,6 +154,7 @@ jobs:
           set -euo pipefail
           sudo -E bash scripts/build-rootfs.sh
           sudo chown -R "$(id -u):$(id -g)" work/out
+          sudo chown "$(id -u):$(id -g)" work/firstlogin.txt 2>/dev/null || true
 
       - name: 组装产物
         run: |
@@ -169,7 +170,10 @@ jobs:
           cp work/out/k50-rootfs-*.squashfs     dist/ 2>/dev/null || true
           cp work/out/packages.txt           dist/
           cp work/out/SHA256SUMS.txt         dist/
-          cp work/firstlogin.txt             dist/ 2>/dev/null || true
+          # firstlogin.txt 是 build-rootfs.sh 以 root 身份写的（mode 600），前面已 chown 回来；
+          # 这里读不到就让它红，别悄悄发一个没有口令的镜像。
+          cp work/firstlogin.txt             dist/ || { echo "::error::work/firstlogin.txt 取不到，初始终端口令无法随附件发布"; exit 1; }
+          chmod 0644 dist/firstlogin.txt
 
           {
             cat work/out/BUILD.txt
