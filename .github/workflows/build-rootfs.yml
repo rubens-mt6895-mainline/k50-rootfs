@@ -170,7 +170,15 @@ jobs:
             echo "注意：rootfs 里没有厂商固件（WiFi/BT/触摸），按 docs/FLASH.md 从你自己的设备拷进 /lib/firmware。"
           } >> dist/BUILD.txt
 
-          ( cd dist && sha256sum *.img.zst *.tar.zst packages.txt > SHA256SUMS.txt )
+          (
+            cd dist
+            rm -f SHA256SUMS.txt
+            # glob 前加 ./ 避免以 - 开头的文件名被当成选项（SC2035）
+            for f in ./*.img.zst ./*.tar.zst ./*.squashfs BUILD.txt packages.txt; do
+              [ -f "$f" ] && sha256sum "$f"
+            done > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          )
           ls -lh dist
 
       - name: 上传 artifact
