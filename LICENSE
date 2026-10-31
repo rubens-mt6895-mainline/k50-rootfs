@@ -19,12 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-本许可仅覆盖本仓库自身的脚本、配置与 overlay 文件。
-
-* 装进镜像的 Debian 软件包：各自遵循其许可证（见镜像内 /usr/share/doc/*/copyright）。
-* 厂商固件（WiFi / 蓝牙 / 触摸 / GPU 等 .bin 与 .cfg）：**不包含在本仓库**，
-  也不随 Release 分发；需要时从你自己的设备上提取自用。
-* 内核、内核补丁、外部内核模块：见 k50-boot 仓库（GPL-2.0）。

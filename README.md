@@ -102,6 +102,7 @@ sudo k50-image snapshot && sudo k50-image activate system-<时间戳> && sudo re
 
 本仓库的脚本、配置与 overlay：MIT（见 [LICENSE](LICENSE)）；
 Debian 包各自的许可证不变（清单见 `packages.txt`）。
+装进镜像的厂商固件来自 [k50-firmware](https://github.com/rubens-mt6895-mainline/k50-firmware)，那批文件没有许可，细节见 [NOTICE.md](NOTICE.md)。
 
 ## Related links
 
