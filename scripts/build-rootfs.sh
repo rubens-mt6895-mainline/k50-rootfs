@@ -170,8 +170,11 @@ chroot_run /bin/bash -euc "
 	locale-gen
 	echo 'LANG=zh_CN.UTF-8' > /etc/default/locale
 
+	# set -x 会把这条口令整个回显到 stderr，而 Actions 日志是公开的：设口令前后关掉追踪
+	set +x
 	id -u $USERNAME >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash $USERNAME
 	echo '$USERNAME:$PASSWORD' | chpasswd
+	set -x
 	# 某些组可能还没被任何包创建；缺了就补，否则 usermod 会整体失败
 	for g in sudo audio video plugdev input render netdev bluetooth; do
 		getent group \$g >/dev/null || groupadd \$g
@@ -203,9 +206,30 @@ cp -a "$REPO/overlay/." "$ROOT/"
 		fi
 	done' "$ROOT" {} + )
 
+# 合并额外文件不能写成 cp -a "$EXTRA_DIR/." "$ROOT/"：trixie 的 /lib 是 → usr/lib 的
+# 符号链接，cp 把"目录拷到符号链接上"当错误直接 abort（CI 实测：
+# cp: cannot overwrite non-directory '.../rootfs/./lib' with directory '.../extra/./lib'）。
+# 这里逐项递归，目标若是符号链接就先解析到真实目录再往里写。
+merge_extra() {
+	local src="$1" dst="$2" item name target
+	for item in "$src"/*; do
+		[ -e "$item" ] || continue
+		name="${item##*/}"
+		target="$dst/$name"
+		if [ -L "$target" ] && [ -d "$target" ]; then
+			target="$(readlink -f "$target")"
+		fi
+		if [ -d "$item" ] && [ -d "$target" ]; then
+			merge_extra "$item" "$target"
+		else
+			cp -a "$item" "$target"
+		fi
+	done
+}
+
 if [ -d "$EXTRA_DIR" ]; then
 	log "合并 $EXTRA_DIR（厂商固件等本地产物，不进 git）"
-	cp -a "$EXTRA_DIR/." "$ROOT/"
+	merge_extra "$EXTRA_DIR" "$ROOT"
 else
 	log "没有 $EXTRA_DIR；跳过本地额外文件（见 docs/FLASH.md 的厂商固件一节）"
 fi
