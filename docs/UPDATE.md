@@ -164,6 +164,16 @@ overlayfs: failed to verify upper root origin      ← 真正的原因
 顺带验证了安全网真的有用：那次挂载失败后 `pivot` 自动 `exec` 了原 systemd，
 设备照常起来（只是"更新没生效"），`/data` 和系统都没受损 —— 这就是"不会变砖"的实际样子。
 
+**启用脚本自己的两个 bug（2026-10-31 在 chroot 里真跑时抓到，已修）**
+
+| 症状 | 根因 | 修法 |
+| --- | --- | --- |
+| 全新系统上 `enable-image-mode.sh --yes` 一定死在"自检没过"，报 `镜像里缺 /usr/local/sbin/k50-image` | 脚本先 `mksquashfs` 打镜像、**之后**才 `install` `pivot`/`k50-image` → 第一个镜像里永远没有这两个文件（设备上因为之前跑过、`/usr/local/sbin/` 已有残留，掩盖了这个顺序错误） | 把安装（含 `dash -n` 语法校验）提到打镜像之前，成为 step 2c |
+| 自检报"镜像里缺 xxx"，但其实新镜像没问题 | 自检对象取的是 `system-current`（**上一次**在用的老镜像） | 自检对象改成刚打出来的那个镜像，取不到才退回 `system-current`，并打印"自检对象：<名字>" |
+
+同一次真跑里 `--revert` 也验过了：开关删除、`/usr/sbin/init` 还原成 `../lib/systemd/systemd`、
+`dpkg-divert --list` 清空、`/data` 用户数据与 `/images` 里的镜像都保留。
+
 ## 6.6 换镜像后 SSH 进不去（主机密钥不跟着镜像走）
 
 真机上换到「全新构建的镜像」后遇到过：SSH 端口能连上、但连接立刻被关闭、读不到 banner。
@@ -231,3 +241,42 @@ sudo ssh-keygen -A && sudo systemctl restart ssh
 | `k50-boot` | 内核、dtb、厂商 ramdisk（boot.img） | `dd of=/dev/sdc43` 或 fastboot |
 
 两者互不影响：换系统不动内核，换内核不动系统 —— 所以出错时能明确定位是谁的问题。
+
+## 9. 事故与自救（2026-10-31 真机）
+
+**事故经过**：把一个「从零构建的干净镜像」当 lower 换上了日常机器。用户看到的现象是
+「整个系统都换成了新的（连 /etc 的改动都没了）」。
+
+**为什么不是丢数据**：可写层 `/data/upper` 一直没被碰过（事故当时 820 MB，`etc`/`home`/
+`root`/`var`/`opt` 都在），旧镜像也还完整躺在 `/images`。overlay 的语义是**上部盖下部**：
+旧系统里凡是「从来没有被改写过」的文件（整个 `/usr`、`/etc` 里的默认值、`/home` 骨架）
+都会被新镜像的同名文件挡住 —— 看起来像全新系统，其实只是被遮住了。
+
+**自救（连 `k50-image` 都没了的时候）**：
+
+```bash
+# 看有哪些镜像、现在是哪个
+readlink /images/system-current
+ls /images/
+
+# 指回旧镜像（k50-image activate 做的就是这两行）
+sudo ln -sfn system-20261030-164732.squashfs /images/system-current.tmp
+sudo mv -Tf /images/system-current.tmp /images/system-current
+sudo reboot
+```
+
+只要 `/data/upper` 还在，切回旧镜像就等于回到事故前的状态（可写层是同一份）。
+
+**现在的三道防线**：
+
+1. `scripts/build-rootfs.sh` 第 4b 步会把 `image-mode/pivot`、`image-mode/k50-image`、
+   `scripts/enable-image-mode.sh`（装成 `/usr/local/sbin/k50-enable-image-mode.sh`）
+   一起打进镜像 —— 换上去之后仍然有 CLI 可以切回来。
+2. `k50-image install` 会检查镜像里有没有 `/usr/local/sbin/k50-image` 并提示；
+   `k50-image activate` 会**直接拒绝**切换这种镜像（除非显式 `--force`），
+   因为那等于把回滚工具丢掉。
+3. 换 lower 前先 `k50-image list` 看清「要切的是不是另一套系统」：包数和体积差异
+   （1123 个包 vs 1395 个包这种事）一眼就能看出来。
+
+**一句话结论**：镜像模式换的是「系统层」，不是「数据」；但把**另一套系统**当系统层，
+用户看到的就是「我的系统没了」。从零构建的干净镜像适合新机器/救援，不适合当日常层。

@@ -193,6 +193,19 @@ sed -i "s|^LABEL=[^[:space:]]*|LABEL=$IMG_LABEL|" "$ROOT/etc/fstab"
 chmod +x "$ROOT"/usr/local/sbin/*.sh "$ROOT"/usr/local/sbin/*.py 2>/dev/null || true
 [ -d "$ROOT/home/$USERNAME" ] && chown -R 1000:1000 "$ROOT/home/$USERNAME"
 
+# ── 4b. image-mode 工具也要进镜像 ────────────────────────────────────────────
+# 教训（2026-10-31 真机事故）：镜像里如果没有 k50-image/pivot，一旦把它当 lower 换上，
+# 新系统里连"切回旧镜像"的命令都没有了，只能手工改 /images/system-current 符号链接。
+log "安装 image-mode 工具（pivot / k50-image / 启用脚本）"
+install -m 0755 "$REPO/image-mode/pivot" "$ROOT/usr/local/lib/k50/pivot"
+install -m 0755 "$REPO/image-mode/k50-image" "$ROOT/usr/local/sbin/k50-image"
+install -m 0755 "$REPO/scripts/enable-image-mode.sh" \
+	"$ROOT/usr/local/sbin/k50-enable-image-mode.sh"
+for f in "$ROOT/usr/local/lib/k50/pivot" "$ROOT/usr/local/sbin/k50-image"; do
+	[ -f "$f" ] || die "image-mode 工具没进镜像：$f"
+done
+echo "  k50-image / pivot 已入镜像"
+
 for u in k50-backlight.service k50-bt-agent.service k50-ble-launch.service k50-powerkey.service k50-ssh-keys.service; do
 	[ -f "$ROOT/etc/systemd/system/$u" ] && systemctl --root="$ROOT" enable "$u" >/dev/null 2>&1 \
 		&& echo "  enabled $u"

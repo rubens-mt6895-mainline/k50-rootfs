@@ -205,7 +205,7 @@ fi
 # ---------------------------------------------------------------- 装文件（先装！）
 # 必须在 mksquashfs **之前**：第一个镜像里如果缺 /usr/local/sbin/k50-image，
 # 后面「自检」会判失败 → 开关永远打不开（本地 chroot 实测踩到：全新系统直接 --yes 必挂在这里）。
-step "2b" "安装 pivot 与 k50-image（先装，再打镜像）"
+step "2c" "安装 pivot 与 k50-image（先装，再打镜像）"
 [ -f "$REPO_DIR/image-mode/pivot" ] || die "找不到 $REPO_DIR/image-mode/pivot"
 [ -f "$REPO_DIR/image-mode/k50-image" ] || die "找不到 $REPO_DIR/image-mode/k50-image"
 mkdir -p "$(dirname "$PIVOT_DST")"

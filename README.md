@@ -200,12 +200,24 @@ sudo ./scripts/enable-image-mode.sh --revert        # 彻底撤掉（还原 /sbi
   根本不存在，无脑 mkdir 会在根文件系统上凭空造出一个假 `/data`，密钥写进那层"假存档"，
   下次进镜像模式真 `/data` 覆盖上来就像丢了。现在只在镜像模式下才建。
 
+* **别把「另一套系统」当系统层换上去**（2026-10-31 真机事故）。换 lower 只是换"读的那一层"，
+  可写层 `/data/upper` 一个字都不动；但如果新 lower 是**从零构建的干净系统**，旧系统里所有
+  "从来没被改写过"的文件（整个 `/usr`、`/etc` 里的默认值、`/home` 骨架）都会被同名文件遮住，
+  用户看到的就是"我的系统全被换掉了"。换之前先 `k50-image list` 看一眼包数/体积差异
+  （1123 个包 vs 1395 个包这种差别很明显）。自救办法（连 CLI 都没了时怎么切回去）写在
+  `docs/UPDATE.md` §9。
+* **镜像里必须自带 `k50-image` 和 `pivot`**：否则把它换上之后，新系统里连"切回旧镜像"的
+  命令都没有了，只能手工改 `/images/system-current` 符号链接。`build-rootfs.sh` 第 4b 步
+  负责把这两个（外加启用脚本）装进镜像；`k50-image install` 会提示、`k50-image activate`
+  会**直接拒绝**这种镜像（除非 `--force`）。
+
 上面这套（生成 / 幂等 / 换镜像后从 `/data` 恢复同一把 / 存档也没了就重新生成 /
 `authorized_keys` 恢复成 `600` 且属主正确 / 普通启动不建 `/data`）**已在真实构建出来的
 rootfs 里 chroot 逐项跑过**（六种情形全绿），不是纸面推导。
 
-`--revert`（彻底还原 `/sbin/init`）目前只做了静态检查，**还没在真机上跑过**；
-真要用之前建议先用 `--dry-run` 看一遍它会动什么。
+`--revert`（彻底还原 `/sbin/init` + 清 `dpkg-divert`）已在**真实 rootfs 的 chroot 沙箱里
+真跑过**（还原后 `/usr/sbin/init` 回到 `../lib/systemd/systemd`、divert 清空、`/images`
+与 `/data` 里的数据保留）；**设备上还没跑过**，真要用请先 `--dry-run` 看它要动什么。
 
 ## 六、已知限制
 

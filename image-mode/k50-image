@@ -39,6 +39,16 @@ running_image() {
 
 sha_of() { sha256sum "$1" | awk '{print $1}'; }
 
+# 镜像里是否带 image-mode 工具（k50-image 自己）。
+# 这条检查是 2026-10-31 真机事故换来的：把一个"不含 k50-image"的镜像当 lower 换上去后，
+# 新系统里连切回旧镜像的命令都没有了，只能手工改 $CURRENT 符号链接。
+# 返回 0=有  1=明确没有  2=无法判断（没有 unsquashfs）
+image_has_tools() {
+	command -v unsquashfs >/dev/null 2>&1 || return 2
+	unsquashfs -l "$1" 2>/dev/null | grep -qE '/usr/local/sbin/k50-image$' && return 0
+	return 1
+}
+
 check_squashfs() {
 	local f="$1"
 	[ -f "$f" ] || die "文件不存在：$f"
@@ -132,6 +142,17 @@ cmd_install() {
 	esac
 	check_squashfs "$tmp"
 
+	image_has_tools "$tmp"
+	case $? in
+	0) ok "镜像自带 image-mode 工具（k50-image/pivot）" ;;
+	1)
+		warn "镜像里没有 /usr/local/sbin/k50-image（image-mode 工具）"
+		echo "    换上去之后无法在新系统里用 k50-image 切回；只能手工改符号链接："
+		echo "      sudo ln -sfn <旧镜像> $CURRENT.tmp && sudo mv -Tf $CURRENT.tmp $CURRENT && sudo reboot"
+		;;
+	*) warn "没有 unsquashfs，跳过多带工具的检查" ;;
+	esac
+
 	local got; got="$(sha_of "$tmp")"
 	if [ -n "$want" ] && [ "$got" != "$want" ]; then
 		rm -f "$tmp"
@@ -150,7 +171,14 @@ cmd_install() {
 
 cmd_activate() {
 	need_root activate
-	local name="${1:-}"; [ -n "$name" ] || die "用法：k50-image activate <镜像名|文件名|全部路径>"
+	local force=0 name=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--force) force=1; shift ;;
+		*) name="$1"; shift ;;
+		esac
+	done
+	[ -n "$name" ] || die "用法：k50-image activate <镜像名|文件名|全部路径> [--force]"
 	[ -d "$IMAGES" ] || die "$IMAGES 不存在"
 	local target
 	if [ -f "$name" ]; then
@@ -165,6 +193,18 @@ cmd_activate() {
 		die "找不到镜像：$name（用 k50-image list 看有哪些）"
 	fi
 	check_squashfs "$target"
+
+	image_has_tools "$target"
+	case $? in
+	0) : ;;
+	1)
+		warn "这个镜像里没有 /usr/local/sbin/k50-image（image-mode 工具）"
+		echo "    切换后新系统里没有 k50-image，切回旧镜像只能手工改符号链接："
+		echo "      sudo ln -sfn <旧镜像> $CURRENT.tmp && sudo mv -Tf $CURRENT.tmp $CURRENT && sudo reboot"
+		[ "$force" = 1 ] || die "已中止（确实要切请加 --force）"
+		;;
+	*) warn "没有 unsquashfs，无法检查镜像是否带 image-mode 工具（继续）" ;;
+	esac
 
 	local rel
 	case "$target" in
@@ -269,7 +309,7 @@ k50-image —— 镜像模式（只读系统层 + 可写 overlay）管理
   status                     看当前状态（默认）
   list                       列出本机镜像
   install <文件|URL> [--sha256 H]   装入新镜像
-  activate <镜像>            下次启动切到这个镜像（原子操作）
+  activate <镜像> [--force]  下次启动切到这个镜像（原子操作；镜像不带 k50-image 时需 --force）
   rollback                   切回上一个镜像
   enable / disable           打开/关闭镜像模式（下次重启生效）
   prune [N]                  只保留最新 N 个镜像（默认 $KEEP_DEFAULT，被引用的不删）
