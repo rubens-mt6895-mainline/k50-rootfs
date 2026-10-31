@@ -289,8 +289,46 @@ cmd_diff() {
 	echo "  sudo k50-image reset-upper   # 会删除整个可写层，务必先备份"
 }
 
-cmd_reset_upper() {
-	need_root reset-upper
+# 把「现在跑的这套系统」打成新镜像 —— 换系统（升级/换版本）的正确姿势。
+# 之所以要这条命令：日常更新应当从"自己这套系统"迭代出镜像；用别处从零构建的干净镜像
+# 当系统层，会把你没改过的文件全遮住（2026-10-31 真机事故）。
+cmd_snapshot() {
+	need_root snapshot
+	local out="${1:-}" comp="${K50_SQUASH_COMP:-gzip}"
+	[ -d "$IMAGES" ] || mkdir -p "$IMAGES"
+	if [ -z "$out" ]; then
+		out="$IMAGES/system-$(date -u '+%Y%m%d-%H%M%S').squashfs"
+	else
+		case "$out" in /*) : ;; *) out="$IMAGES/$out" ;; esac
+	fi
+	[ -e "$out" ] && die "$out 已存在"
+
+	command -v mksquashfs >/dev/null 2>&1 || die "需要 squashfs-tools（apt install squashfs-tools）"
+
+	# 排除一切挂载点与易变目录，否则会把"当前的只读层"再套一层打进新镜像
+	local ex=() p
+	for p in /proc /sys /dev /run /tmp /mnt /images /data \
+		/var/tmp /var/cache/apt /var/lib/apt/lists \
+		/var/lib/k50/ro /var/lib/k50/new \
+		/var/log/journal /var/log/wtmp /var/log/lastlog /var/log/btmp /swapfile \
+		/root/k50rf-work /root/k50rf-test; do
+		[ -e "$p" ] && ex+=("$p")
+	done
+	info "从当前系统打快照（压缩 ${comp}）"
+	echo "  排除：${ex[*]}"
+	echo "  输出：$out"
+	mksquashfs / "$out" -comp "$comp" -noappend -no-progress -e "${ex[@]}" \
+		|| { rm -f "$out"; die "mksquashfs 失败"; }
+	sha_of "$out" >"$out.sha256"
+	ok "已生成 $(basename "$out")（$(human "$(stat -c%s "$out")")）"
+	if [ "$comp" = gzip ]; then
+		echo "   切换： sudo k50-image activate $(basename "$out") && sudo reboot"
+	else
+		warn "压缩用的是 $comp —— 只有内核编进了对应 CONFIG_SQUASHFS_* 才能挂载"
+	fi
+}
+
+cmd_reset_upper() {	need_root reset-upper
 	is_bootstrap || die "不能在镜像模式下重置自己正在用的可写层（先在引导层/救援模式里做）"
 	[ -d "$UPPER" ] || { ok "可写层本来就没有"; return 0; }
 	read -r -p "确认删除 $UPPER 里的全部改动？输入 yes 继续： " a
@@ -314,6 +352,7 @@ k50-image —— 镜像模式（只读系统层 + 可写 overlay）管理
   enable / disable           打开/关闭镜像模式（下次重启生效）
   prune [N]                  只保留最新 N 个镜像（默认 $KEEP_DEFAULT，被引用的不删）
   diff [N]                   看可写层里改了哪些顶层目录
+  snapshot [文件名]          把"现在跑的这套系统"打成新镜像（日常更新的正确姿势）
   reset-upper                丢掉全部改动（只在引导层可用，先备份）
 
   典型更新流程：
@@ -335,6 +374,7 @@ case "${1:-status}" in
 	prune) shift; cmd_prune "$@" ;;
 	diff) shift; cmd_diff "$@" ;;
 	reset-upper) cmd_reset_upper ;;
+	snapshot) shift; cmd_snapshot "$@" ;;
 	-h | --help | help) usage ;;
 	*) usage; exit 1 ;;
 esac

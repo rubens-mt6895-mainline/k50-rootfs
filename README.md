@@ -152,7 +152,12 @@ sudo ./scripts/enable-image-mode.sh --dry-run   # 先干跑：打包 + 自检挂
 sudo ./scripts/enable-image-mode.sh --yes       # 正式启用（把 /sbin/init 换成 pivot）
 sudo reboot && sudo k50-image status
 
-scp k50-rootfs-trixie.squashfs k50:/tmp/        # 以后更新
+# 日常更新：从"自己这套系统"打快照，而不是换一套陌生系统（详见 docs/UPDATE.md §10）
+sudo apt update && sudo apt full-upgrade
+sudo k50-image snapshot                         # → /images/system-<UTC 时间戳>.squashfs
+sudo k50-image activate system-<时间戳> && sudo reboot
+
+scp k50-rootfs-trixie.squashfs k50:/tmp/        # 也可以从别处拿镜像
 ssh k50 "sudo k50-image install /tmp/k50-rootfs-trixie.squashfs"
 ssh k50 "sudo k50-image activate system-<时间戳> && sudo reboot"
 ssh k50 "sudo k50-image rollback && sudo reboot"   # 起不来就切回去
@@ -173,6 +178,8 @@ sudo ./scripts/enable-image-mode.sh --revert        # 彻底撤掉（还原 /sbi
 | 换镜像（`activate` 新镜像）+ 重启 | ✅ 新系统起来，**旧镜像里写的文件还在**（可写层跨镜像保留） |
 | `rollback` + 重启 | ✅ 切回上一个镜像，两个镜像都还在 |
 | 挂载失败时的兜底 | ✅ 真触发过一次：`pivot` 自动退回普通启动，数据无损 |
+| `k50-image snapshot`（从当前系统打快照） | ✅ 1 分 30 秒出 1.8 GiB 镜像，镜像里自带 `/usr/local/sbin/k50-image` |
+| `activate` 一个不带 `k50-image` 的镜像 | 🛡️ 被拒绝（`rc=1`，`system-current` 未变），提示手工切回的办法 |
 
 **首次启用前踩过的坑（已在代码里修掉，别重复踩）**：
 

@@ -280,3 +280,35 @@ sudo reboot
 
 **一句话结论**：镜像模式换的是「系统层」，不是「数据」；但把**另一套系统**当系统层，
 用户看到的就是「我的系统没了」。从零构建的干净镜像适合新机器/救援，不适合当日常层。
+
+## 10. 日常更新：从「自己这套系统」打快照（`k50-image snapshot`）
+
+镜像模式的更新循环应该是**同一套系统往前走**，而不是换一套陌生系统：
+
+```bash
+# 1) 先在当前系统里把要做的事做完（apt upgrade、改配置、装东西……）
+sudo apt update && sudo apt full-upgrade
+
+# 2) 把"现在跑的这套系统"打成新镜像（排除挂载点/缓存/journal，不会把当前只读层套进来）
+sudo k50-image snapshot                    # → /images/system-<UTC 时间戳>.squashfs
+# 也可以指定名字： sudo k50-image snapshot before-升级.squashfs
+
+# 3) 切过去 + 重启；起不来就 rollback
+sudo k50-image activate system-<那个时间戳> && sudo reboot
+```
+
+为什么强调"自己这套"：换 lower 时，旧系统里**没被改过**的文件会新镜像同名文件被遮住。
+如果新镜像是从零构建的另一套系统，用户看到的就是"我的系统被换掉了"（见 §9 的事故）。
+`snapshot` 打出来的是当前系统的合并视图（只读层 + 可写层里被改过的文件），换上去视觉上
+几乎无感 —— 这正是"更新"该有的样子。
+
+几个细节：
+
+* 压缩默认 `gzip`（这台内核只有 gzip 的 squashfs 解压支持）；想试 zstd 用
+  `K50_SQUASH_COMP=zstd sudo k50-image snapshot`，但**内核没编 `CONFIG_SQUASHFS_ZSTD` 就会挂不上**。
+* `/data`、`/images`、`/var/lib/k50/{ro,new}`、`/var/log/journal`、apt 缓存、
+  `/root/k50rf-*` 都在排除列表里；镜像里不会出现"上一层的副本"。
+* 快照会**保留** `/etc/ssh/ssh_host_*`（当前系统里有），所以换到快照镜像后 SSH 不会掉 ——
+  `k50-ssh-keys` 那套机制是给"从零构建、不带主机密钥"的镜像兜底的。
+* 快照体积 ≈ 系统实际占用再压一把（本机 3.5 GB `/usr` → 约 1.3 GB 镜像），
+  `/images` 空间不够时先 `k50-image prune`。
