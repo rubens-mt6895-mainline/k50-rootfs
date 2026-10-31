@@ -77,7 +77,8 @@ rootfs 实际占用 3.5 GB，squashfs 1.3 GB（gzip），`img.zst` 874 MB。
 4. Actions → **build-rootfs** → Run workflow。
 
 CI 默认跑在 **arm64 runner**（`ubuntu-24.04-arm`，原生构建，不需要 qemu）。
-手动 Run 的时候有个 **`runner` 下拉框**：选 `ubuntu-24.04` 就走免费 x86 + qemu
+按本仓库的预期用法（**公开仓库**），这个默认值开箱可用 —— 不必装 qemu，也不必改任何东西。
+手动 Run 的时候有个 **`runner` 下拉框**：选 `ubuntu-24.04` 就走 x86 + qemu
 （「装构建工具」那步会自动装 qemu/binfmt，脚本启动时会检查 `/proc/sys/fs/binfmt_misc/qemu-aarch64`）。
 
 > `ubuntu-24.04-arm` 只对**公开仓库**免费；私有仓库把 `runner` 选成 `ubuntu-24.04` 即可
