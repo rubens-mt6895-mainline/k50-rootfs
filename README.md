@@ -1,4 +1,4 @@
-# k50-rootfs — 给 Redmi K50（rubens）的 Debian rootfs
+# k50-rootfs
 
 [![build-rootfs](https://github.com/rubens-mt6895-mainline/k50-rootfs/actions/workflows/build-rootfs.yml/badge.svg)](https://github.com/rubens-mt6895-mainline/k50-rootfs/actions/workflows/build-rootfs.yml)
 [![release](https://img.shields.io/github/v/release/rubens-mt6895-mainline/k50-rootfs?include_prereleases)](https://github.com/rubens-mt6895-mainline/k50-rootfs/releases)
