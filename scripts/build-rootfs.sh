@@ -26,7 +26,7 @@ IMAGE_SIZE_GIB="${IMAGE_SIZE_GIB:-8}"
 IMG_LABEL="${IMG_LABEL:-k50rootfs}"
 SYS_HOSTNAME="${SYS_HOSTNAME:-k50-linux}"
 USERNAME="${USERNAME:-k50}"
-PASSWORD="${PASSWORD:-}"   # 留空 = 随机生成（只写进 work/firstlogin.txt，不进产物与日志）
+PASSWORD="${PASSWORD:-}"   # 留空 = 随机生成；结果写进 work/firstlogin.txt（CI 把它当 Release 附件发）
 SYS_TZ="${SYS_TZ:-Asia/Shanghai}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
 
@@ -79,15 +79,17 @@ if [ "$TARGET_ARCH" = arm64 ] && [ "$HOST_IS_AARCH64" = 0 ]; then
 fi
 
 log "构建参数"
-# password 留空时现场生成一个强随机口令，只落 work/firstlogin.txt（构建机本地，不进产物/日志）
+# 留空就现场生成 16 位随机口令；不管哪种来源，都写一份 work/firstlogin.txt
+# （CI 会把它当 Release 附件发出去：机器默认没开串口，第一次登录只能靠这个文件）
 if [ -z "$PASSWORD" ]; then
 	PASSWORD="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
-	mkdir -p "$WORK"
-	umask 077
-	printf 'host=%s  user=%s  password=%s\n' "$SYS_HOSTNAME" "$USERNAME" "$PASSWORD" > "$WORK/firstlogin.txt"
-	umask 022
-	log "已生成随机初始口令：见 $WORK/firstlogin.txt"
+	log "已生成随机初始口令"
 fi
+mkdir -p "$WORK"
+umask 077
+printf 'host=%s  user=%s  password=%s\n' "$SYS_HOSTNAME" "$USERNAME" "$PASSWORD" > "$WORK/firstlogin.txt"
+umask 022
+log "初始口令记录：$WORK/firstlogin.txt"
 cat <<EOF
   suite         = $SUITE
   mirror        = $MIRROR
@@ -95,7 +97,7 @@ cat <<EOF
   image         = $IMG (${IMAGE_SIZE_GIB} GiB，构建后收缩)
   label         = $IMG_LABEL
   hostname/user = $SYS_HOSTNAME / $USERNAME
-  password      = (留空时随机生成，见 work/firstlogin.txt)
+  password      = 见 firstlogin.txt（随机生成；登录后立刻 passwd）
   timezone      = $SYS_TZ
   jobs          = $JOBS
 EOF
@@ -206,6 +208,12 @@ if [ -d "$EXTRA_DIR" ]; then
 	cp -a "$EXTRA_DIR/." "$ROOT/"
 else
 	log "没有 $EXTRA_DIR；跳过本地额外文件（见 docs/FLASH.md 的厂商固件一节）"
+fi
+
+# EXTRA_DIR 里的固件也是 cp -a 拷进来的（可能来自 drvfs / 解包归档），同样归一化
+if [ -d "$ROOT/lib/firmware" ]; then
+	chown -R root:root "$ROOT/lib/firmware" 2>/dev/null || true
+	find "$ROOT/lib/firmware" -type f -exec chmod 0644 {} + 2>/dev/null || true
 fi
 
 # fstab 的卷标必须与真实 mkfs 的标签一致

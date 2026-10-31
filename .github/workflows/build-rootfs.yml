@@ -125,6 +125,20 @@ jobs:
           fi
           mmdebstrap --version
 
+      - name: 取厂商固件
+        run: |
+          set -euo pipefail
+          URL="$(sed -n 's/^firmware_tarball=//p' config/config | tail -1)"
+          if [ -z "$URL" ]; then
+            echo "firmware_tarball 为空：镜像不带厂商固件"
+            exit 0
+          fi
+          mkdir -p work/extra
+          curl -fsSL --retry 3 -o work/firmware.tar.gz "$URL"
+          tar -xzf work/firmware.tar.gz -C work/extra --strip-components=1
+          echo "固件文件数：$(find work/extra -type f | wc -l)"
+          ls work/extra/lib/firmware
+
       - name: 构建 rootfs
         env:
           SUITE: ${{ steps.cfg.outputs.suite }}
@@ -155,6 +169,7 @@ jobs:
           cp work/out/k50-rootfs-*.squashfs     dist/ 2>/dev/null || true
           cp work/out/packages.txt           dist/
           cp work/out/SHA256SUMS.txt         dist/
+          cp work/firstlogin.txt             dist/ 2>/dev/null || true
 
           {
             cat work/out/BUILD.txt
@@ -166,15 +181,20 @@ jobs:
             echo "烧写（设备上，root）："
             echo "  zstd -d k50-rootfs-${{ steps.cfg.outputs.suite }}.img.zst -c | dd of=/dev/sdc86 bs=4M oflag=direct status=progress"
             echo "  重启后：resize2fs /dev/sdc86"
+            echo "  默认口令：见 firstlogin.txt（登录后立刻 passwd 改掉）"
             echo
-            echo "注意：rootfs 里没有厂商固件（WiFi/BT/触摸），按 docs/FLASH.md 从你自己的设备拷进 /lib/firmware。"
+            if grep -q '^firmware_tarball=..*' config/config; then
+              echo "厂商固件     : 已内置（来自 k50-firmware 仓，版权与许可见那个仓库）"
+            else
+              echo "厂商固件     : 未包含（按 docs/FLASH.md 从自己的设备拷进 /lib/firmware）"
+            fi
           } >> dist/BUILD.txt
 
           (
             cd dist
             rm -f SHA256SUMS.txt
             # glob 前加 ./ 避免以 - 开头的文件名被当成选项（SC2035）
-            for f in ./*.img.zst ./*.tar.zst ./*.squashfs BUILD.txt packages.txt; do
+            for f in ./*.img.zst ./*.tar.zst ./*.squashfs BUILD.txt firstlogin.txt packages.txt; do
               [ -f "$f" ] && sha256sum "$f"
             done > SHA256SUMS.txt
             cat SHA256SUMS.txt
@@ -204,6 +224,7 @@ jobs:
             * 自动构建：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             * 烧写方式见 `BUILD.txt` 与仓库 `docs/FLASH.md`
             * 镜像里的包清单见 `packages.txt`
+            * 默认口令见 `firstlogin.txt`（首次登录后请立刻 `passwd`）
           files: dist/*
 
       - name: 清理旧 Release

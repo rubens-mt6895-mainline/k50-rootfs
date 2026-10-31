@@ -20,12 +20,18 @@ image_label=k50rootfs
 # ── 系统 ───────────────────────────────────────────────────
 hostname=k50-linux
 username=k50
-# 留空 = 构建时随机生成，写到构建机的 work/firstlogin.txt
-# （不进产物、不打印进日志）；要自定义就填这里，或用 PASSWORD 环境变量 / Actions Secret
+# 留空 = 构建时随机生成 16 位，写进 firstlogin.txt 并随 Release 一起发
+# （机器默认关串口，首次登录只能靠这个文件）；要自定义就填这里，或用 PASSWORD 环境变量
 password=
 timezone=Asia/Shanghai
 # 额外包，逗号分隔（会追加到 config/packages.list 之后）
 extra_packages=
+
+# ── 厂商固件（触摸 / WiFi / 蓝牙）────────────────────────────
+# 镜像里要带厂商固件就填 k50-firmware 仓某个 commit 的归档地址；
+# 留空 = 不带（构建机上自己往 work/extra/ 放）。这个 commit 里只有固件文件，
+# 混进别的东西会被一并 cp 进根文件系统，钉死版本就是为了防这个。
+firmware_tarball=https://github.com/rubens-mt6895-mainline/k50-firmware/archive/f95fef2a945baff4de1f2e6d6e04a5905ca6e299.tar.gz
 
 # ── Release ────────────────────────────────────────────────
 # ci-* 标签保留几个
