@@ -26,7 +26,7 @@ IMAGE_SIZE_GIB="${IMAGE_SIZE_GIB:-8}"
 IMG_LABEL="${IMG_LABEL:-k50rootfs}"
 SYS_HOSTNAME="${SYS_HOSTNAME:-k50-linux}"
 USERNAME="${USERNAME:-k50}"
-PASSWORD="${PASSWORD:-k50}"
+PASSWORD="${PASSWORD:-}"   # 留空 = 随机生成（只写进 work/firstlogin.txt，不进产物与日志）
 SYS_TZ="${SYS_TZ:-Asia/Shanghai}"
 EXTRA_PACKAGES="${EXTRA_PACKAGES:-}"
 
@@ -79,6 +79,15 @@ if [ "$TARGET_ARCH" = arm64 ] && [ "$HOST_IS_AARCH64" = 0 ]; then
 fi
 
 log "构建参数"
+# password 留空时现场生成一个强随机口令，只落 work/firstlogin.txt（构建机本地，不进产物/日志）
+if [ -z "$PASSWORD" ]; then
+	PASSWORD="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+	mkdir -p "$WORK"
+	umask 077
+	printf 'host=%s  user=%s  password=%s\n' "$SYS_HOSTNAME" "$USERNAME" "$PASSWORD" > "$WORK/firstlogin.txt"
+	umask 022
+	log "已生成随机初始口令：见 $WORK/firstlogin.txt"
+fi
 cat <<EOF
   suite         = $SUITE
   mirror        = $MIRROR
@@ -86,6 +95,7 @@ cat <<EOF
   image         = $IMG (${IMAGE_SIZE_GIB} GiB，构建后收缩)
   label         = $IMG_LABEL
   hostname/user = $SYS_HOSTNAME / $USERNAME
+  password      = (留空时随机生成，见 work/firstlogin.txt)
   timezone      = $SYS_TZ
   jobs          = $JOBS
 EOF
