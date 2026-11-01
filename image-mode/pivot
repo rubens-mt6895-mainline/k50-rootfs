@@ -23,14 +23,19 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 REAL_INIT=/usr/lib/systemd/systemd
-IMAGES=/images
-DATA=/data
+IMAGES="${K50_IMAGES:-/images}"
+DATA="${K50_DATA:-/data}"
 MARKER="$IMAGES/enabled"
 CURRENT="$IMAGES/system-current"
 RO_MNT=/var/lib/k50/ro
 NEW_MNT=/var/lib/k50/new
+RAM_MNT="${K50_RAM_MNT:-/mnt/k50ram}"
+RESCUE_FLAG="$IMAGES/K50-RESCUE"
+RAM_UP="$RAM_MNT/up"
+LOOP_R=""
+LOOP_U=""
 # 日志写到 /data（在 ext4 引导层上，pivot 之后也照样能读到）；没有 /data 就退回 /var/log
-if [ -d /data ]; then LOG=/data/k50-image-init.log; else LOG=/var/log/k50-image-init.log; fi
+if [ -d "$DATA" ]; then LOG=$DATA/k50-image-init.log; else LOG=/var/log/k50-image-init.log; fi
 
 say() { printf 'k50-image-init: %s\n' "$*"; }
 logline() { say "$*"; printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >>"$LOG" 2>/dev/null || true; }
@@ -46,12 +51,213 @@ cleanup() {
 	return 0
 }
 
+rescue_cleanup() {
+	mountpoint -q "$NEW_MNT" && umount -l "$NEW_MNT" 2>/dev/null
+	mountpoint -q "$RAM_UP" && umount -l "$RAM_UP" 2>/dev/null
+	mountpoint -q "$RO_MNT" && umount -l "$RO_MNT" 2>/dev/null
+	[ -n "$LOOP_U" ] && losetup -d "$LOOP_U" 2>/dev/null
+	[ -n "$LOOP_R" ] && losetup -d "$LOOP_R" 2>/dev/null
+	mountpoint -q "$RAM_MNT" && umount -l "$RAM_MNT" 2>/dev/null
+	return 0
+}
+
+
 fallback() {
 	logline "降级到普通启动：$1"
 	cleanup
 	exec "$REAL_INIT"
 }
 
+rescue_fail() {
+	logline "救援模式失败：$1"
+	rescue_cleanup
+	fallback "救援模式失败：$1"
+}
+
+
+# ------------------------------------------------------------------------------
+#  救援模式：纯内存系统 + 离线 e2fsck
+#  这里必须不依赖 $DATA（overlay 上层就在要修的那块盘上，救援时根本不用它）
+# ------------------------------------------------------------------------------
+rescue_mode() {
+	logline "救援模式：发现 $RESCUE_FLAG"
+	# 先改名，避免救援失败/掉电之后无限进救援
+	mv "$RESCUE_FLAG" "$RESCUE_FLAG.running" 2>/dev/null || logline "警告：改不动 $RESCUE_FLAG"
+
+	avail=$(awk '/^MemAvailable:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+	avail=${avail:-0}
+	[ "$avail" -ge 4096 ] || rescue_fail "可用内存不足（${avail}MB，需要 4096MB）"
+	command -v mkfs.ext4 >/dev/null 2>&1 || rescue_fail "没有 mkfs.ext4"
+	command -v losetup >/dev/null 2>&1 || rescue_fail "没有 losetup"
+	command -v pivot_root >/dev/null 2>&1 || rescue_fail "没有 pivot_root"
+
+	mkdir -p "$RAM_MNT" "$RO_MNT" "$NEW_MNT" || rescue_fail "建不了挂载点"
+	mountpoint -q "$RAM_MNT" || mount -t tmpfs -o size=5G,mode=0755 tmpfs "$RAM_MNT" || rescue_fail "挂内存盘失败"
+
+	logline "拷贝系统镜像到内存：$CURRENT"
+	cp "$CURRENT" "$RAM_MNT/root.sqfs" || rescue_fail "拷贝镜像到内存失败"
+	logline "内存里的镜像 $(wc -c <"$RAM_MNT/root.sqfs" 2>/dev/null | tr -d ' ') 字节"
+
+	dd if=/dev/zero of="$RAM_MNT/up.img" bs=1M count=1536 >/dev/null 2>&1 || rescue_fail "建内存可写层失败"
+
+	LOOP_R=$(losetup -f --show -r "$RAM_MNT/root.sqfs" 2>/dev/null) || rescue_fail "losetup 镜像失败"
+	[ -n "$LOOP_R" ] || rescue_fail "losetup 没给出镜像的 loop 设备"
+	mount -t squashfs -o ro "$LOOP_R" "$RO_MNT" 2>/dev/null || rescue_fail "挂 squashfs 失败"
+
+	LOOP_U=$(losetup -f --show "$RAM_MNT/up.img" 2>/dev/null) || rescue_fail "losetup 可写层失败"
+	[ -n "$LOOP_U" ] || rescue_fail "losetup 没给出可写层的 loop 设备"
+	mkfs.ext4 -q -F "$LOOP_U" >/dev/null 2>&1 || rescue_fail "格式化内存可写层失败"
+	mkdir -p "$RAM_UP" || rescue_fail "建不了 $RAM_UP"
+	mount "$LOOP_U" "$RAM_UP" 2>/dev/null || rescue_fail "挂内存可写层失败"
+	mkdir -p "$RAM_UP/upper" "$RAM_UP/work" || rescue_fail "建不了 upper/work"
+
+	mount -t overlay overlay \
+		-o "lowerdir=$RO_MNT,upperdir=$RAM_UP/upper,workdir=$RAM_UP/work" "$NEW_MNT" 2>/dev/null ||
+		rescue_fail "挂内存 overlay 失败"
+
+	for f in /bin/sh /usr/sbin/e2fsck /usr/sbin/tune2fs /usr/bin/awk /bin/umount; do
+		[ -e "$NEW_MNT$f" ] || rescue_fail "救援系统里缺 $f"
+	done
+	# chroot 可以在 /usr/bin、/usr/sbin 或 /bin 下（Debian usrmerge 是 /usr/bin/chroot）
+	[ -e "$NEW_MNT/usr/bin/chroot" ] || [ -e "$NEW_MNT/usr/sbin/chroot" ] || [ -e "$NEW_MNT/bin/chroot" ] ||
+		rescue_fail "救援系统里缺 chroot"
+
+	# 注入 PID1：pivot_root 之后直接跑它（不启动 systemd）
+	cat >"$RAM_UP/upper/k50-rescue-run" <<'K50_RESCUE_EOF'
+#!/bin/sh
+# ==============================================================================
+#  K50 文件系统救援：在纯内存系统里做一次离线 e2fsck
+#  由 pivot 救援模式注入到内存可写层，pivot_root 之后作为 PID1 运行，做完就重启。
+#  产物：/data/k50-rescue/<时间戳>/{pre.log,fix.log,tune.log,summary.txt}
+# ==============================================================================
+set -u
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+DEV="${K50_RESCUE_DEV:-}"
+if [ -z "$DEV" ]; then
+	DEV="$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | sed -n '1p')"
+fi
+[ -n "$DEV" ] || DEV=/dev/sdc86
+OLD=/mnt/.oldroot
+WORK=/tmp/k50fsck
+STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || echo boot)"
+
+mkdir -p "$WORK" 2>/dev/null || true
+: >"$WORK/pre.log" 2>/dev/null || true
+exec >>"$WORK/rescue.log" 2>&1 || true
+
+say() { printf 'k50-rescue: %s\n' "$*"; }
+
+finish() {
+	sum="$1"
+	say "=== 结束：$sum ==="
+	if mkdir -p /mnt/k50data 2>/dev/null && mount -t ext4 "$DEV" /mnt/k50data 2>/dev/null; then
+		dest="/mnt/k50data/k50-rescue/$STAMP"
+		if mkdir -p "$dest" 2>/dev/null; then
+			cp "$WORK/pre.log" "$WORK/fix.log" "$WORK/tune.log" "$WORK/rescue.log" "$dest"/ 2>/dev/null
+			printf '%s\n' "$sum" >"$dest/summary.txt" 2>/dev/null
+			say "报告已写入 $dest"
+		else
+			say "报告目录建不了（$dest）"
+		fi
+		if [ -f /mnt/k50data/images/K50-RESCUE.running ]; then
+			mv /mnt/k50data/images/K50-RESCUE.running /mnt/k50data/images/K50-RESCUE.done 2>/dev/null &&
+				say "触发文件已标记为 K50-RESCUE.done"
+		fi
+		sync
+		umount /mnt/k50data 2>/dev/null || true
+	else
+		say "警告：挂不上 $DEV，报告只能留在内存里（即将丢失）"
+	fi
+	sync
+	sleep 1
+	if [ -n "${K50_RESCUE_NOREBOOT:-}" ]; then
+		say "K50_RESCUE_NOREBOOT 已设置 → 不重启（调试/本地测试用）"
+		exit 0
+	fi
+	say "重启（sysrq b）"
+	echo b >/proc/sysrq-trigger
+	sleep 30
+	say "sysrq 没生效，改用 reboot -f"
+	reboot -f 2>/dev/null || true
+	while :; do sleep 5; done
+}
+
+say "PID1 启动（$STAMP，目标设备 $DEV）"
+mountpoint -q /proc || mount -t proc proc /proc 2>/dev/null || true
+mountpoint -q /sys || mount -t sysfs sysfs /sys 2>/dev/null || true
+[ -d /dev/pts ] || mkdir -p /dev/pts 2>/dev/null
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts 2>/dev/null || true
+[ -d /dev/shm ] || mkdir -p /dev/shm 2>/dev/null
+mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
+
+i=1
+while [ -d "$OLD" ] && [ "$i" -le 5 ]; do
+	umount "$OLD" 2>/dev/null && break
+	say "卸载 $OLD 失败（第 $i 次），1 秒后重试"
+	sleep 1
+	i=$((i + 1))
+done
+
+if [ -d "$OLD" ] && awk '{print $1}' /proc/mounts 2>/dev/null | grep -qx "$DEV"; then
+	say "严重：$DEV 还是挂载状态，绝不 fsck 已挂载的文件系统"
+	awk -v d="$DEV" '$1 == d' /proc/mounts 2>/dev/null
+	finish "放弃：$DEV 卸不掉"
+fi
+
+say "只读体检：e2fsck -fn $DEV"
+e2fsck -fn "$DEV" >"$WORK/pre.log" 2>&1
+pre=$?
+# 注意：e2fsck -n 的退出码不可靠（超级块级的“Free blocks count wrong / Fix? no”也会返回 0），
+# 所以另外数一遍日志里的问题条数，作为“这块盘到底有没有毛病”的依据。
+pre_find="$(grep -cE 'Fix\?|wrong|corrupt|invalid|deleted inode|unattached|should be|Problem' "$WORK/pre.log" 2>/dev/null)"
+# 注意：没命中时 grep -c 也打印 0 但退出码是 1，所以不能写 `|| echo 0`（会拼成 "0\n0"）
+[ -n "$pre_find" ] || pre_find=0
+say "只读体检退出码 $pre，问题行 $pre_find"
+tail -n 4 "$WORK/pre.log" 2>/dev/null | while IFS= read -r line; do say "  pre| $line"; done
+
+pass=1
+fix=99
+while [ "$pass" -le 3 ]; do
+	say "修复：e2fsck -fy $DEV（第 $pass 轮）"
+	e2fsck -fy "$DEV" >>"$WORK/fix.log" 2>&1
+	fix=$?
+	say "第 $pass 轮退出码 $fix"
+	tail -n 3 "$WORK/fix.log" 2>/dev/null | while IFS= read -r line; do say "  fix| $line"; done
+	[ "$fix" -le 1 ] && break
+	pass=$((pass + 1))
+done
+
+if [ "$fix" -ge 4 ]; then
+	finish "e2fsck -fy 没修干净（最后一轮退出码 $fix，共 $pass 轮；体检问题行 $pre_find），请人工看 pre.log/fix.log"
+fi
+
+say "加日志（journal）：tune2fs -O has_journal $DEV"
+tune2fs -O has_journal "$DEV" >"$WORK/tune.log" 2>&1
+tune=$?
+state="$(tune2fs -l "$DEV" 2>/dev/null | awk -F': *' '/^Filesystem state/{print $2; exit}')"
+feats="$(tune2fs -l "$DEV" 2>/dev/null | awk -F': *' '/^Filesystem features/{print $2; exit}')"
+if printf '%s' "$feats" | grep -q has_journal; then jr=yes; else jr=no; fi
+say "tune2fs 退出码 $tune，state=${state:-?}，has_journal=$jr"
+
+finish "完成：体检问题行=$pre_find，修复轮数=$pass（末次 fix=$fix），state=${state:-?}，has_journal=$jr"
+K50_RESCUE_EOF
+	chmod 0755 "$RAM_UP/upper/k50-rescue-run" 2>/dev/null || rescue_fail "写不了救援脚本"
+
+	mkdir -p "$NEW_MNT/mnt/.oldroot" || rescue_fail "建不了 $NEW_MNT/mnt/.oldroot"
+	mount --move /dev "$NEW_MNT/dev" 2>/dev/null || true
+	mount --move /proc "$NEW_MNT/proc" 2>/dev/null || true
+	mount --move /sys "$NEW_MNT/sys" 2>/dev/null || true
+
+	cd "$NEW_MNT" || rescue_fail "cd 新根失败"
+	pivot_root . mnt/.oldroot 2>/dev/null || rescue_fail "pivot_root 失败（救援）"
+	exec chroot . /k50-rescue-run
+}
+
+logline "启动检查（root=$(cat /proc/cmdline 2>/dev/null)）"
+
+# /proc /sys 是内核交给 init 时唯一没挂的两个（/dev 由 devtmpfs 自动挂）
 logline "启动检查（root=$(cat /proc/cmdline 2>/dev/null)）"
 
 # /proc /sys 是内核交给 init 时唯一没挂的两个（/dev 由 devtmpfs 自动挂）
@@ -66,6 +272,10 @@ fi
 [ -x "$REAL_INIT" ] || fallback "找不到 $REAL_INIT"
 [ -e "$MARKER" ] || fallback "镜像模式未启用（没有 $MARKER）"
 [ -e "$CURRENT" ] || fallback "没有当前镜像（$CURRENT）"
+
+# 救援请求（修文件系统用；不带这个文件就走正常流程）
+[ -f "$RESCUE_FLAG" ] && rescue_mode
+
 [ -d "$DATA/upper" ] || fallback "可写层不存在（$DATA/upper）"
 command -v losetup >/dev/null 2>&1 || fallback "没有 losetup"
 command -v pivot_root >/dev/null 2>&1 || fallback "没有 pivot_root"
