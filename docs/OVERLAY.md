@@ -23,8 +23,13 @@ usr/local/sbin/k50-growfs.sh    开机把根分区扩满（镜像被 resize2fs -
 usr/local/sbin/k50-*.py|sh      K50 专属脚本（电源键守护、蓝牙回连、LE 初始化）
 usr/local/sbin/bt_agent.py      蓝牙配对代理（NoInputNoOutput，自动接受）
 usr/local/lib/k50/README.txt    /usr/local/lib/k50 用途说明（k50_bl.ko 会装在这里）
+usr/share/alsa/ucm2/conf.d/mt6895-mt6368/…  ALSA UCM：给这张卡补一个「Speaker」（PCM device 2）
+usr/share/alsa/ucm2/mt6895-mt6368/HiFi.conf  上面那个 UCM 引用的 HiFi 用例（扬声器 + 耳机）
 home/k50/.local/share/gnome-shell/extensions/…  两个自写 GNOME 扩展
 ```
+
+> 没有 `usr/share/alsa/ucm2/…` 这两份文件时，PipeWire 只认 PCM device 0（耳机），
+> GNOME 声音设置里只有「模拟耳机」，外放永远没声 —— 详见 `docs/UPDATE.md` §6.8。
 
 ## 不在这里的东西
 

@@ -432,3 +432,36 @@ unsquashfs -l "$1" 2>/dev/null | grep -qE '/usr/local/sbin/k50-image$' && return
 > 更正一条旧记录：此前写的「`activate` 会拒绝没有工具的镜像，真机实测 rc=1」其实是这个
 > bug 造成的**假拒绝**（对任何镜像都拒）。修复后重新验证：无工具镜像 `185731` → `rc=1`
 > 拒绝且 `system-current` 未动；自拍快照 → `rc=0` 正常切换。
+
+## 6.8 外放没声音、GNOME 里没有亮度滑块（2026-11-01 真机定位）
+
+### 症状
+
+* 声音设置里只有一个「内置音频 · 模拟耳机」，无论怎么调都没声（耳机也没插）。
+* GNOME 里根本没有亮度滑块，`/sys/class/backlight/` 是空目录。
+
+### 声音：这张卡有两个 PCM 播放设备，PipeWire 只认了第一个
+
+`aplay -l` 会看到 `Playback_1`（device 0）和 `Playback_2`（device 2）。真机实测：
+
+* device 0 = **耳机通路**
+* device 2 = **扬声器通路**：DL2 → I2S3 → TFA9874 智能功放 → 喇叭
+  （播放时 dmesg 出 `mt6895_fe_trigger(), DL2 cmd 1`、`tfa98xx_tfa_start() … return (0)`，
+  功放 `speaker_amp 6-0034/6-0035` 是内核里的 `[goodix]` 版驱动，工作正常）
+
+没有 UCM 定义时 PipeWire 只认 device 0，于是系统声音全被送到耳机，耳机没插 → 静音。
+**修法**：仓库带两份 ALSA UCM2 文件（`overlay/usr/share/alsa/ucm2/…`），把 device 2
+暴露成一个独立的「Speaker」输出；功放开关 `Ext_Speaker_Amp Switch` 在 UCM 的
+`EnableSequence` 里打开。装上后 `wpctl status` 会同时列出
+`内置音频 Headphones` 与 `内置音频 Speaker`，默认输出切到 Speaker 即可。
+
+### 亮度：镜像里没带 `k50_bl.ko`
+
+这块面板没有 `/sys/class/backlight`，亮度只能经 `mtkfb_set_backlight_level()` 下发。
+`k50_bl.ko` 是 boot 仓编出来的**外部模块**，vermagic 必须与内核逐字一致，所以只能在
+构建时从内核 CI 的 release 取（`scripts/build-rootfs.sh` 的「4d. 取 k50_bl.ko」，
+可用 `K50_KO_URL` 覆盖 URL）。取不到只是没有亮度滑块，系统照常启动：
+`k50-backlight.service` 有 `ConditionPathExists=/usr/local/lib/k50/k50_bl.ko`，会安静地跳过。
+
+真机验证：把 `k50_bl.ko` 放进 `/usr/local/lib/k50/` 后重启该服务 → `/sys/class/backlight/l11a`
+出现（`brightness` 2047 / `max_brightness` 2047），GNOME 亮度滑块可用。

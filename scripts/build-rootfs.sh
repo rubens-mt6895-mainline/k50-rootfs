@@ -342,6 +342,24 @@ ln -sfn /usr/local/lib/k50/pivot "$ROOT/usr/sbin/init"
 [ -e "$ROOT/sbin/init" ] || ln -sfn ../usr/sbin/init "$ROOT/sbin/init"
 echo "  /images/enabled + /data/{upper,work,fstab.image} 已预置，/usr/sbin/init → pivot"
 
+# ── 4d. 取 k50_bl.ko（背光）─────────────────────────────────────────────────
+# 这块面板没有 /sys/class/backlight，亮度只能通过 mtkfb_set_backlight_level()
+# 下发；k50_bl.ko 是编在 boot 仓里的外部模块，vermagic 必须与内核完全一致，
+# 所以只能从内核 CI 的 release 取，不能在 rootfs 这边编。
+# 取不到不算失败：没有它只是 GNOME 里没有亮度滑块，系统照常启动。
+KO_URL="${K50_KO_URL:-https://github.com/rubens-mt6895-mainline/k50-boot/releases/download/ci-20261101-073409-UTC/k50_bl.ko}"
+log "取背光模块 k50_bl.ko"
+if command -v curl >/dev/null 2>&1; then
+	if curl -fsSL --retry 3 --retry-delay 2 -o "$WORK/k50_bl.ko" "$KO_URL" && [ -s "$WORK/k50_bl.ko" ]; then
+		install -D -m 0644 "$WORK/k50_bl.ko" "$ROOT/usr/local/lib/k50/k50_bl.ko"
+		echo "  k50_bl.ko → /usr/local/lib/k50/k50_bl.ko（$(wc -c <"$WORK/k50_bl.ko") 字节）"
+	else
+		echo "  警告：k50_bl.ko 下载失败（$KO_URL），跳过 —— 装好后 GNOME 里不会有亮度滑块"
+	fi
+else
+	echo "  警告：没有 curl，跳过 k50_bl.ko"
+fi
+
 # ── 5. 清理（隐私 + 体积）────────────────────────────────────────────────────
 log "清理"
 chroot_run /bin/bash -euc "
