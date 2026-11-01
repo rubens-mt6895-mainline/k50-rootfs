@@ -438,6 +438,38 @@ if [ -d "$DATA/persist/etc-ssh" ]; then
 	logline "已把 $NEW_KEYS 个 SSH 主机密钥恢复进新根"
 fi
 
+# SSH 登录公钥：镜像里默认没有 authorized_keys，换 lower 之后 root 就进不去了
+# （真机踩过：换成 CI 镜像后只能改用普通用户+口令登录）。这里在 pivot 之前从
+# 引导层 / 可写层 / $DATA/persist 三处找现成的公钥补进新根；只在新根里没有
+# （或为空）时才补，不覆盖镜像自带的。
+restore_keys() {
+	_dst="$1"
+	shift
+	[ -s "$_dst" ] && return 0
+	for _src in "$@"; do
+		[ -s "$_src" ] || continue
+		mkdir -p "$(dirname "$_dst")" 2>/dev/null || continue
+		if cp -f "$_src" "$_dst" 2>/dev/null; then
+			chmod 700 "$(dirname "$_dst")" 2>/dev/null || true
+			chmod 600 "$_dst" 2>/dev/null || true
+			logline "SSH 公钥：新根缺少 $_dst 对应的公钥，已从 $_src 补上"
+			return 0
+		fi
+	done
+	return 1
+}
+restore_keys "$NEW_MNT/root/.ssh/authorized_keys" \
+	"$DATA/persist/authorized_keys" \
+	"$DATA/upper/root/.ssh/authorized_keys" \
+	"/root/.ssh/authorized_keys" || true
+restore_keys "$NEW_MNT/home/k50/.ssh/authorized_keys" \
+	"$DATA/persist/k50-authorized_keys" \
+	"$DATA/upper/home/k50/.ssh/authorized_keys" \
+	"/home/k50/.ssh/authorized_keys" || true
+if [ -d "$NEW_MNT/home/k50/.ssh" ]; then
+	chown -R 1000:1000 "$NEW_MNT/home/k50/.ssh" 2>/dev/null || true
+fi
+
 mkdir -p "$NEW_MNT/mnt/.oldroot"
 
 # API 文件系统搬进新根
