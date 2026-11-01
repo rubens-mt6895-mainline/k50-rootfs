@@ -338,8 +338,32 @@ else
 	logline "镜像模式已启动：/ = overlay($CURRENT + $DATA/upper)"
 fi
 
+# 预置厂商固件：先看当前根（= 引导层）的 /usr/lib/firmware 里都有什么。
+# 厂商 ramdisk 里的 CINIT（minimal init）开机时会把 MTK 的固件按**裸文件名**拷到
+# /lib/firmware 顶层（/lib 是 usr/lib 的软链，所以就是 /usr/lib/firmware/xxx_hdr.bin），
+# 并且设备自己生成的 mediatek/mt6895/WIFI、BT_Addr 也只存在引导层上。
+# 首开模式下最终根就是引导层，它们天然可见；一旦把 squashfs 设成下层，最终根的
+# /usr/lib/firmware 就是镜像里那份（没有这些），内核 request_firmware 直接 -2 ——
+# 真机现象就是「换镜像后 Wi-Fi/蓝牙没了」。所以这里先把引导层整份固件（真机上
+# 只有 48 个文件 / 15 MB）一次性预置到 $DATA/firmware，之后换任何镜像都在。
+if [ -d /usr/lib/firmware ]; then
+	seed_fw=0
+	[ -d "$DATA/firmware" ] || seed_fw=1
+	[ -f "$DATA/firmware/mediatek/mt6895/WIFI" ] || seed_fw=1
+	[ -f "$DATA/firmware/soc7_0_ram_wmmcu_1b_t_1_hdr.bin" ] || seed_fw=1
+	if [ "$seed_fw" = 1 ]; then
+		mkdir -p "$DATA/firmware" 2>/dev/null || true
+		# -n：已经有了的（可能是更新的）不覆盖，只补缺的
+		if cp -a -n /usr/lib/firmware/. "$DATA/firmware/" 2>/dev/null; then
+			logline "已把引导层的厂商固件预置到 $DATA/firmware（$(find "$DATA/firmware" -type f 2>/dev/null | wc -l) 个文件）"
+		else
+			logline "警告：预置厂商固件失败，Wi-Fi/蓝牙/触摸可能起不来"
+		fi
+	fi
+fi
+
 # 厂商固件补齐：CI 打出来的镜像里没有 soc7_0_ram_*.bin / WIFI_RAM_CODE_* 这类
-# 小米/MTK 二进制（版权原因不进仓库）。它们放在 $DATA/firmware（启用时从引导层拷过来），
+# 小米/MTK 二进制（版权原因不进仓库）。它们放在 $DATA/firmware（上面已从引导层预置），
 # 这里把它叠在系统层**之上**：/data 优先，镜像里的 Debian 固件兜底。
 # 这样换系统镜像不会把 WiFi/蓝牙/触摸固件弄丢。
 if [ -d "$DATA/firmware" ] && [ -d "$NEW_MNT/usr/lib/firmware" ]; then
@@ -348,6 +372,41 @@ if [ -d "$DATA/firmware" ] && [ -d "$NEW_MNT/usr/lib/firmware" ]; then
 		-o "lowerdir=$DATA/firmware:$NEW_MNT/usr/lib/firmware,upperdir=$DATA/fw-up,workdir=$DATA/fw-wk,index=off" \
 		"$NEW_MNT/usr/lib/firmware" 2>/dev/null ||
 		logline "警告：固件叠加层挂载失败（WiFi/蓝牙/触摸固件可能缺失）"
+fi
+
+# 网络连接配置（Wi-Fi/热点）：这类文件是「用户数据」，不能跟着镜像走。
+# 真机踩过的坑：换镜像后 `/etc/NetworkManager/system-connections/` 里出现一堆 **0 字节**
+# 的同名文件（可写层里有空文件就会盖住下层的原件），NM 读不到可用配置，表现就是
+# 「Wi-Fi 列表里没有已保存的网络，非让我重新输密码」。
+# 而且此刻 `/` 还是引导层（真正的 ext4），这里读到的是**真文件**；一旦 pivot 完，
+# 合并视图对空文件的元数据会撒谎（stat 说有内容、read 出来 0 字节），所以修复
+# 必须在 pivot 之前、直接对着 $DATA（ext4 真实路径）做。
+NM_DIR="$DATA/persist/nm"
+if [ -d /etc/NetworkManager/system-connections ]; then
+	mkdir -p "$NM_DIR" 2>/dev/null || true
+	NM_ADDED=0
+	for f in /etc/NetworkManager/system-connections/*.nmconnection; do
+		[ -f "$f" ] || continue
+		[ -s "$f" ] || continue
+		b="$(basename "$f")"
+		if [ ! -f "$NM_DIR/$b" ]; then
+			cp -f "$f" "$NM_DIR/$b" 2>/dev/null && NM_ADDED=$((NM_ADDED + 1))
+		fi
+	done
+	# 清掉历史遗留的 0 字节垃圾（它们只会让 NM 显示一堆坏连接）
+	NM_JUNK=0
+	for f in "$NM_DIR"/*.nmconnection; do
+		[ -f "$f" ] || continue
+		if [ ! -s "$f" ]; then rm -f "$f"; NM_JUNK=$((NM_JUNK + 1)); fi
+	done
+	chown -R root:root "$NM_DIR" 2>/dev/null || true
+	chmod 700 "$NM_DIR" 2>/dev/null || true
+	mkdir -p "$NEW_MNT/etc/NetworkManager/system-connections"
+	if mount --bind "$NM_DIR" "$NEW_MNT/etc/NetworkManager/system-connections" 2>/dev/null; then
+		logline "网络配置：用 $NM_DIR（$(ls "$NM_DIR"/*.nmconnection 2>/dev/null | wc -l) 个）覆盖新根的 /etc/NetworkManager/system-connections；本次新增 $NM_ADDED，清掉 $NM_JUNK 个空文件"
+	else
+		logline "警告：网络配置 bind 失败，换镜像后可能要重新输 Wi-Fi 密码"
+	fi
 fi
 
 # 让新系统里 /images、/data 与引导层是同一份（路径不变，k50-image 两边都能用）

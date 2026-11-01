@@ -186,33 +186,6 @@ cmd_install() {
 	echo "   然后： sudo reboot"
 }
 
-# 换下层之前，把"属于这台机器、用户配置出来的东西"搬进可写层 $UPPER。
-# 不搬的话它们只存在于当前下层（或首开时的引导层）里，一旦换成新镜像就消失。
-# 真机实测：刷机时预置的 Wi-Fi 连接就在引导层上，activate 之后 Wi-Fi 直接没了。
-# 只搬 NetworkManager 的连接配置（Wi-Fi/热点口令），这类东西本来就该跟着人走，
-# 而任何镜像都不应该内置别人的 SSID 口令。
-promote_stateful_config() {
-	local src=/etc/NetworkManager/system-connections
-	[ -d "$src" ] || return 0
-	[ -d "$UPPER" ] || return 0
-	local dst="$UPPER/etc/NetworkManager/system-connections"
-	local n=0 f
-	shopt -s nullglob
-	for f in "$src"/*.nmconnection; do
-		[ -f "$f" ] || continue
-		mkdir -p "$dst" 2>/dev/null || continue
-		cp -f "$f" "$dst/" 2>/dev/null || continue
-		chown root:root "$dst/$(basename "$f")" 2>/dev/null || true
-		chmod 600 "$dst/$(basename "$f")" 2>/dev/null || true
-		n=$((n + 1))
-	done
-	shopt -u nullglob
-	if [ "$n" -gt 0 ]; then
-		ok "已把 $n 个网络配置（Wi-Fi/热点）搬进可写层，换镜像后仍然连得上"
-	fi
-	return 0
-}
-
 cmd_activate() {
 	need_root activate
 	local force=0 name=""
@@ -250,7 +223,9 @@ cmd_activate() {
 	*) warn "没有 unsquashfs，无法检查镜像是否带 image-mode 工具（继续）" ;;
 	esac
 
-	promote_stateful_config
+	# 注意：网络配置的搬运/修复不在这里做。pivot 在 pivot_root 之前、正对着
+	# 引导层（真 ext4）时做才可靠 —— 在合并视图里 stat 一个被 0 字节文件盖住的
+	# 文件会得到错误的大小，拷出来就是 0 字节（真机踩过：把好的 profile 拷坏）。
 
 	local rel
 	case "$target" in
