@@ -1,0 +1,15 @@
+[Unit]
+Description=K50 volume keys -> PipeWire (power key daemon does not touch them)
+Documentation=file:/usr/local/sbin/k50-volkeys.py
+After=multi-user.target sound.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /run/user/1000/bus ] && exit 0; sleep 1; done; exit 0'
+ExecStart=/usr/local/sbin/k50-volkeys.py
+Restart=always
+RestartSec=5
+TimeoutStartUSec=1min 30s
+
+[Install]
+WantedBy=multi-user.target

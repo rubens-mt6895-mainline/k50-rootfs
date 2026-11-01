@@ -140,6 +140,19 @@ jobs:
           echo "固件文件数：$(find work/extra -type f | wc -l)"
           ls work/extra/lib/firmware
 
+      - name: 取内核模块
+        run: |
+          set -euo pipefail
+          URL="$(sed -n 's/^modules_tarball=//p' config/config | tail -1)"
+          if [ -z "$URL" ]; then
+            echo "modules_tarball 为空：镜像不带内核模块"
+            exit 0
+          fi
+          mkdir -p work
+          curl -fsSL --retry 3 -o work/modules.tar.gz "$URL"
+          echo "模块包 $(stat -c%s work/modules.tar.gz) 字节"
+          tar -tzf work/modules.tar.gz | sed -n '1,5p'
+
       - name: 构建 rootfs
         env:
           SUITE: ${{ steps.cfg.outputs.suite }}

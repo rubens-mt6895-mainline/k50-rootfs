@@ -122,100 +122,111 @@ sudo k50-image reset-upper     # 丢掉全部改动回到镜像原样（只能�
 3. `k50-image disable && reboot` 能回到普通启动（说明退路通）；
 4. `k50-image install` + `activate` + 重启能换系统，`rollback` 能切回。
 
-## 6.5 实测记录（本机真实跑过的，含踩到的坑）
 
-| 时间点 | 结果 |
-| --- | --- |
-| `--dry-run` | 通过：建 `/images` `/data`、搬 19 个厂商固件、打 1.94 GB 镜像、自检挂载全绿、不动 `/sbin/init` |
-| 首次启用 + 重启 | 成功进镜像模式：`/` = overlay（lowerdir=`/var/lib/k50/ro`，upperdir=`/data/upper`），`/data`、`/images` 均可见 |
-| 切到另一个镜像 + 重启 | **第一次失败** → 见下面的 index=off，修好后成功 |
-| 回滚 + 重启 | 通过：切回上一个镜像，两个镜像都在，标记文件都还在 |
+## 6.5 常见问题
 
-**另一个坑（已修）：镜像里不能带"源机器正在写的那份 journal"**
+<details>
+<summary><b>Q：开机后 dmesg 没完没了地刷 <code>overlayfs: failed to look up (user-1000.journal)</code>，用户日志再也写不进去？</b></summary>
 
-镜像模式跑起来后 `dmesg` 每隔半分钟刷一次：
+镜像带了打包时**正在写**的 `/var/log/journal/`。journald 要在只读层上对同名文件做 copy-up，
+overlayfs 解析它时报 ESTALE（-116），`user-1000.journal` 从此写不进去；别人的历史日志还会
+一起打进镜像发出去。
 
-```
-overlayfs: failed to get inode (-116)
-overlayfs: failed to look up (user-1000.journal) for ino (-116)      ← -116 = ESTALE
-```
+修法：`build-rootfs.sh` 清理段删 `/var/log/journal/*`、`/var/log/*.log*`、`wtmp/lastlog/btmp`，
+并且**同时换掉 `/etc/machine-id` 和 `/var/lib/dbus/machine-id`** —— 只换前者，systemd 会沿用
+dbus 那份 id，正好又撞进镜像里那份旧 journal 目录。`mksquashfs -e` 的排除项再加
+`var/log/journal`，双保险。
 
-原因是系统镜像（squashfs）里带着构建时**正在写**的 `/var/log/journal/`
-（`enable-image-mode.sh` 打的是"当前正在跑的系统"），开机后 journald 要往同名文件上做
-copy-up，overlayfs 在只读层上解析这个文件就报 ESTALE，结果是**用户日志（user-1000.journal）
-再也写不进去**。而且这份 journal 本来就是别人的历史日志，会一起打进镜像里发出去。
+</details>
 
-修法（两个脚本都已改）：
+<details>
+<summary><b>Q：换 lower 之后挂载失败，报 <code>Stale file handle</code> / <code>failed to verify upper root origin</code>？</b></summary>
 
-* `build-rootfs.sh` 清理段：`rm -rf /var/log/journal/*`、`/var/log/*.log*`、`wtmp/lastlog/btmp`；
-  并且**同时换掉 `/etc/machine-id` 和 `/var/lib/dbus/machine-id`** —— 只清前者时 systemd 会沿用
-  dbus 的那份 id，新系统仍然用旧 id，正好撞进镜像里那份旧 journal 目录。
-* `enable-image-mode.sh` 与 `build-rootfs.sh` 的 `mksquashfs -e` 排除项都加上 `var/log/journal`
-  等日志文件，双保险。
+overlayfs 默认会把 upper 根的 `origin` xattr 和当前 lower 根比对。我们故意换了 lower，
+比对必然失败，于是拒绝挂载。
 
-**踩到的坑：overlayfs 会校验「upper 根 origin = 当前 lower 根」**
+修法：挂载时加 `index=off`。`image-mode/pivot` 里两处 overlay（系统层和固件层）都加了。
 
-第一次切镜像（lower 从镜像 A 换成镜像 B，`/data/upper` 保持不动）时挂载失败：
+这一步失败不影响开机：`pivot` 会直接 `exec` 原来的 systemd，设备照常起来，只是"更新没生效"，
+`/data` 和系统都没受损 —— 这就是"不会变砖"的实际样子。
 
-```
-mount: /var/lib/k50/new: fsconfig() failed: Stale file handle.
-overlayfs: "xino" feature enabled using 32 upper inode bits.
-overlayfs: failed to verify upper root origin      ← 真正的原因
-```
+</details>
 
-因为 overlayfs 默认（`index=on` 时）会把 upper 根的 `origin` xattr 和当前 lower 根比对，
-我们故意换了 lower，比对失败就拒绝挂载。**修法：挂载时加 `index=off`**。
-`image-mode/pivot` 里两处 overlay（系统层 + 固件层）都加了，实测换 lower 后 `rc=0` 正常挂载，
-上层写的文件也还在（`/etc/k50-image-mode-test` 换镜像后仍可读）。
+<details>
+<summary><b>Q：跑 <code>enable-image-mode.sh --yes</code> 必定死在自检，报「镜像里缺 <code>/usr/local/sbin/k50-image</code>」？</b></summary>
 
-顺带验证了安全网真的有用：那次挂载失败后 `pivot` 自动 `exec` 了原 systemd，
-设备照常起来（只是"更新没生效"），`/data` 和系统都没受损 —— 这就是"不会变砖"的实际样子。
+脚本先 `mksquashfs` 打镜像、**之后**才 `install` 这两个文件，所以第一份镜像里永远没有它们。
+设备上看不出来，是因为之前跑过、`/usr/local/sbin/` 已有残留，把这个顺序错误盖住了。
 
-**启用脚本自己的两个 bug（2026-10-31 在 chroot 里真跑时抓到，已修）**
+修法：把安装（含 `dash -n` 语法校验）提到打镜像之前（step 2c）。
 
-| 症状 | 根因 | 修法 |
-| --- | --- | --- |
-| 全新系统上 `enable-image-mode.sh --yes` 一定死在"自检没过"，报 `镜像里缺 /usr/local/sbin/k50-image` | 脚本先 `mksquashfs` 打镜像、**之后**才 `install` `pivot`/`k50-image` → 第一个镜像里永远没有这两个文件（设备上因为之前跑过、`/usr/local/sbin/` 已有残留，掩盖了这个顺序错误） | 把安装（含 `dash -n` 语法校验）提到打镜像之前，成为 step 2c |
-| 自检报"镜像里缺 xxx"，但其实新镜像没问题 | 自检对象取的是 `system-current`（**上一次**在用的老镜像） | 自检对象改成刚打出来的那个镜像，取不到才退回 `system-current`，并打印"自检对象：<名字>" |
+</details>
 
-同一次真跑里 `--revert` 也验过了：开关删除、`/usr/sbin/init` 还原成 `../lib/systemd/systemd`、
-`dpkg-divert --list` 清空、`/data` 用户数据与 `/images` 里的镜像都保留。
+<details>
+<summary><b>Q：自检说镜像里缺文件，可新镜像明明有？</b></summary>
 
-### 6.5.1 预置镜像模式（出厂即镜像模式）排练抓到的三个坑（2026-11-01，已修）
+自检对象取的是 `system-current`，也就是**上一次**在用的老镜像。
 
-| 症状 | 根因 | 修法 |
-| --- | --- | --- |
-| 开机时 `pivot` 自我重入 3 次、叠出 3 层 overlay，内核报 `overlayfs: maximum fs stacking depth exceeded`；随后 GDM / `user@1000` 全挂、`/root` 连文件都写不进去 | `pivot` 结尾原来写的是 `exec chroot . /sbin/init`，而预置镜像模式把 `/sbin/init` divert 成了 `pivot` 自己 → 无限自我重入（老系统没这问题，因为那里的 `/sbin/init` 仍是 `../lib/systemd/systemd`） | 改成 `exec chroot . "$REAL_INIT"`（`REAL_INIT=/usr/lib/systemd/systemd`），并加注释警告**绝对不要**写回 `/sbin/init` |
-| 上面的重入之所以能发生，是因为"已经在我们自己的 overlay 里就直接交 systemd"的守卫**从来没生效过** | `/proc/mounts` 把全部挂载选项塞在 `$4` 一个字段里（`rw,relatime,lowerdir=…,upperdir=/data/upper,workdir=…`），而守卫写的是 `for(i=4;i<=NF;i++) if (index($i,u)==1)` —— 要求"某个字段以 `upperdir=/data/upper,` 开头"，永远匹配不上 | 改成按逗号 `split($0,a,",")` 切开、逐 token 精确比对，命中时打印"已经在镜像模式的根里…" |
-| `k50-growfs.service` active 却什么都没做，日志 `k50-growfs: /overlay 不是块设备，跳过` | 镜像模式下 `findmnt -no SOURCE /` 返回 `overlay`，脚本又对非路径值做了 `readlink -f` → 变成 `/overlay`，`[ -b ]` 判否 | 改成 `find_root_dev()`：按 `/ → /data → /images → /mnt/.oldroot` 顺序试 `findmnt -no SOURCE --target`，只接受 `/dev/*` 形状再 `readlink -f` + `[ -b ]`，找不到就打"找不到根设备，跳过" |
+修法：自检对象改成刚打出来的那个镜像，取不到才退回 `system-current`，并打印
+「自检对象：<名字>」。
 
-处理这三个坑时还踩了两个运维坑：设备当时已经处于三层 overlay 的病态里，往 `/usr/local/lib/k50/`
-写文件会 `ENOENT`/`EEXIST`（写 overlay 上层失败），而 **`/data/..` 不能用来摸引导层**（bind 挂载的
-`..` 会解析回合并根，又被坏 overlay 拒绝）。唯一可靠的引导层真身路径是 `findmnt` 里那个
-device-backed 挂载点（当时是 `/mnt/.oldroot/mnt/.oldroot`，源 `/dev/sdc86`），直接往那里 `cp` 才改得动本体。
+</details>
 
-修好后真机复核：`pivot` 日志单次（启动检查→首开→首开完成→pivot_root→交给 systemd 各 1 次）、
-`overlay` 挂载数 = 1、无内核告警、`gdm`/`user@1000`/`gnome-shell`/`/run/user/1000/bus` 全部正常、
-`k50-growfs` 打出 `/dev/sdc86 已经占满（231063 MiB），无需扩容`。
+<details>
+<summary><b>Q：出厂预置镜像模式下开机，<code>pivot</code> 自我重入、叠出好几层 overlay，GDM 和 <code>user@1000</code> 全起不来？</b></summary>
 
-## 6.6 换镜像后 SSH 进不去（主机密钥不跟着镜像走）
+`pivot` 结尾原来是 `exec chroot . /sbin/init`，而预置镜像模式把 `/sbin/init` divert 成了
+`pivot` 自己 —— 于是无限自我重入，内核报 `overlayfs: maximum fs stacking depth exceeded`。
+老系统碰不到，因为那里的 `/sbin/init` 仍是 `../lib/systemd/systemd`。
 
-真机上换到「全新构建的镜像」后遇到过：SSH 端口能连上、但连接立刻被关闭、读不到 banner。
-不是网络问题，是 **sshd 起不来**：
+修法：改成 `exec chroot . "$REAL_INIT"`（`REAL_INIT=/usr/lib/systemd/systemd`），并在代码里
+注明**绝对不要**写回 `/sbin/init`。
 
-```
-sshd: no hostkeys available -- exiting
-```
+</details>
 
-原因有两层：
+<details>
+<summary><b>Q："已经在我们自己的 overlay 里就直接交 systemd"的守卫从来没生效？</b></summary>
 
-1. `build-rootfs.sh` 在清理阶段会删掉 `/etc/ssh/ssh_host_*`（**故意**的：不让镜像带上
-   构建机/旧机器的身份，也是"可复现构建"的要求）；
-2. 设备原有的主机密钥位于**旧镜像的只读层**里，换 lower 之后就"消失"了。
+`/proc/mounts` 把全部挂载选项塞在 `$4` 一个字段里
+（`rw,relatime,lowerdir=…,upperdir=/data/upper,workdir=…`），而守卫写的是
+`for(i=4;i<=NF;i++) if (index($i,u)==1)`，要求"某个字段以 `upperdir=/data/upper,` 开头"，
+永远匹配不上。
 
-`authorized_keys` 同理：它在 `~k50/.ssh/` 里，属于私有数据，也不会进镜像。
+修法：按逗号 `split($0,a,",")` 切开、逐 token 精确比对，命中时打印「已经在镜像模式的根里…」。
 
-现在的做法（**跟着数据走，不跟着镜像走**）：
+</details>
+
+<details>
+<summary><b>Q：<code>k50-growfs.service</code> 是 active 的，什么都不做，日志只写「/overlay 不是块设备，跳过」？</b></summary>
+
+镜像模式下 `findmnt -no SOURCE /` 返回的是 `overlay`，脚本又对它做了 `readlink -f`，
+变成 `/overlay`，`[ -b ]` 判否，直接跳过。
+
+修法：`find_root_dev()` 按 `/ → /data → /images → /mnt/.oldroot` 顺序试
+`findmnt -no SOURCE --target`，只接受 `/dev/*` 形状再 `readlink -f` + `[ -b ]`，
+找不到就打「找不到根设备，跳过」。
+
+</details>
+
+<details>
+<summary><b>Q：设备已经卡在坏掉的 overlay 里，往 <code>/usr/local/lib/k50/</code> 写文件报 ENOENT/EEXIST，怎么改引导层本体？</b></summary>
+
+写 overlay 上层失败是坏挂载的直接后果；而 `/data/..` 也救不了你 —— bind 挂载的 `..`
+会解析回合并根，又被坏 overlay 拒绝。
+
+唯一可靠的是 `findmnt` 里那个 device-backed 挂载点（本次是 `/mnt/.oldroot/mnt/.oldroot`，
+源 `/dev/sdc86`），直接往那里 `cp` 才改得动本体。
+
+</details>
+
+<details>
+<summary><b>Q：换镜像后 SSH 端口能连上、但立刻被关闭，读不到 banner？</b></summary>
+
+不是网络问题，是 sshd 起不来：`sshd: no hostkeys available -- exiting`。
+`build-rootfs.sh` 会故意删掉 `/etc/ssh/ssh_host_*`（不让镜像带上构建机/旧机器身份），
+而设备原有的主机密钥在旧镜像的只读层里，换 lower 之后就"消失"了。
+
+修法是让密钥跟着数据走，不跟着镜像走：
 
 | 位置 | 内容 | 谁维护 |
 | --- | --- | --- |
@@ -224,64 +235,112 @@ sshd: no hostkeys available -- exiting
 | `usr/local/sbin/k50-ssh-keys.sh` | 恢复/生成/回写 | `k50-ssh-keys.service`（`Before=ssh.service`） |
 | `image-mode/pivot` | 开机时先把密钥拷进新根 | 每次启动 |
 
-因为 `/data` 在 ext4 引导层上、换镜像不动它，所以这之后**换多少次镜像 SSH 都不会再掉**。
+`/data` 在 ext4 引导层上、换镜像不动它，所以这之后换多少次镜像 SSH 都不会再掉。
 
-老镜像（还没这套机制的）救急办法：在设备上跑
+老镜像（还没这套机制的）救急：
 
 ```sh
 sudo ssh-keygen -A && sudo systemctl restart ssh
 ```
 
-## 6.7 换镜像后 Wi-Fi 密码、蓝牙固件也没了（2026-11-01 真机定位）
+</details>
 
-换到「全新构建的镜像」之后遇到两台设备上最要命的现象：**Wi-Fi 列表里没有任何已保存的
-网络**，得重新输密码；蓝牙也打不开。都不是镜像做坏了，是两个东西没跟着数据走：
+<details>
+<summary><b>Q：换镜像后 Wi-Fi 列表空白，所有网络都要重新输密码？</b></summary>
 
-**① 网络配置（Wi-Fi/热点 profile）**
+`/etc/NetworkManager/system-connections/*.nmconnection` 原本只存在于引导层。换成 squashfs
+当 lower 后，新根的 `/etc` 来自镜像，里面没有这些文件；而可写层里若存在 0 字节的同名文件，
+它会把下层那份完好的 profile **盖住**，NM 读出空 psk，于是像新设备一样问密码。
 
-`/etc/NetworkManager/system-connections/*.nmconnection` 原本只存在于**引导层**（ext4）。
-换成 squashfs 当 lower 之后，新根的 `/etc` 来自 squashfs，里面没有这些文件；而可写层里
-如果存在 0 字节的同名文件，它会把下层那份完好的 profile **盖住** —— NM 读出空的 psk，
-于是像新设备一样问密码。
+别在 activate 阶段去"搬"这些 profile：合并视图里 `stat` 一个被 0 字节文件盖住的文件会返回
+**错误的大小**（说有内容、`read` 出来 0 字节），照抄就把好文件清成 0 字节，越更新越坏。
 
-更坑的是：不能在 activate 阶段"把 profile 搬进可写层"。合并视图里 `stat` 一个被 0 字节
-文件盖住的文件会返回**错误的大小**（说有内容、`read` 出来 0 字节），照抄就把好文件清成
-0 字节，越更新越坏（这个坑真机上踩过一次，用户的 profile 被我清了两回）。
+现在的做法：`pivot` 在 `pivot_root` **之前**（此时 `/` 还是引导层真 ext4，读到的一定是原件）
+把非空的 `*.nmconnection` 播种到 `/data/persist/nm`（只补缺、不覆盖、幂等），删掉其中的
+0 字节垃圾，再把 `$DATA/persist/nm` bind 到新根的 `/etc/NetworkManager/system-connections`。
+换任何 lower 都不影响，仓库里也不带任何口令。
 
-现在的做法：`image-mode/pivot` 在 `pivot_root` **之前**（此时 `/` 还是引导层真 ext4，
-读到的一定是原件）把非空的 `*.nmconnection` 播种到 `/data/persist/nm`（只补缺、不覆盖、
-幂等），删掉其中的 0 字节垃圾，再把 `$DATA/persist/nm` **bind** 到新根的
-`/etc/NetworkManager/system-connections`。换任何 lower 都不影响，仓库里也不带任何口令。
+</details>
 
-**② 厂商固件（MTK 的 Wi-Fi/BT blob）**
+<details>
+<summary><b>Q：换镜像后 Wi-Fi/BT 起不来，日志 <code>Direct firmware load for soc7_0_ram_wmmcu_1b_t_1_hdr.bin failed with error -2</code>？</b></summary>
 
-厂商 ramdisk 里的 `CINIT`（minimal init）会按**裸文件名**把 MTK 固件拷到 `/lib/firmware`
-顶层（`soc7_0_ram_wmmcu_1b_t_1_hdr.bin`、`WIFI_RAM_CODE_soc7_0_1b_t_1.bin`、
-`st_fts_L11a.ftb` 等），设备自己生成的 `mediatek/mt6895/WIFI`(NVRAM)、`BT_Addr` 也只
-落在引导层。首开模式（lower 就是引导层）当然看得到；换成 squashfs 之后就变成
-`Direct firmware load for soc7_0_ram_wmmcu_1b_t_1_hdr.bin failed with error -2`，
-Wi-Fi bring-up 直接死在这一步。
+厂商 ramdisk 里的 `CINIT` 按**裸文件名**把 MTK 固件拷到 `/lib/firmware` 顶层
+（`soc7_0_ram_wmmcu_1b_t_1_hdr.bin`、`WIFI_RAM_CODE_soc7_0_1b_t_1.bin`、`st_fts_L11a.ftb` 等），
+设备自己生成的 `mediatek/mt6895/WIFI`（NVRAM）、`BT_Addr` 也只落在引导层。首开模式
+（lower 就是引导层）看得到，换成 squashfs 之后就找不到了，Wi-Fi bring-up 死在这一步。
 
 现在的做法：pivot 在挂固件叠加层之前，用 `cp -a -n /usr/lib/firmware/. $DATA/firmware/`
-把**当前根**的整份固件预置到 `/data/firmware`（只补缺、不覆盖，一次即可、之后持久），
-再照旧用它当固件叠加层的第一 lower。
+把当前根的整份固件预置到 `/data/firmware`（只补缺、不覆盖，一次即可、之后持久），
+再照旧拿它当固件叠加层的第一 lower。
 
-**③ SSH 公钥**
+</details>
 
-同上，镜像里没有 `/root/.ssh/authorized_keys`，换 lower 之后就进不去了。pivot 现在会在
-`pivot_root` 之前依次从 `$DATA/persist/authorized_keys`、可写层、引导层找现成的公钥补进
-新根（只在新根里没有或为空时才补）。
+<details>
+<summary><b>Q：换镜像后 <code>/root/.ssh/authorized_keys</code> 没了，公钥进不去？</b></summary>
 
-验收（2026-11-01 真机，换成 CI 的 `system-20261101-103857.squashfs` 之后）：
+镜像里本来就没有它（属于私有数据，不进仓库也不进镜像）。pivot 现在会在 `pivot_root` 之前
+依次从 `$DATA/persist/authorized_keys`、可写层、引导层找现成的公钥补进新根
+（只在新根里没有或为空时才补）。
 
-| 检查 | 结果 |
-| --- | --- |
-| 根 | `overlay`，`lowerdir=/var/lib/k50/ro`、`upperdir=/data/upper` |
-| 网络配置 | `findmnt` 显示 `/dev/sdc86[/data/persist/nm]` bind 到 `/etc/NetworkManager/system-connections`，profile 302/274 字节（不再 0） |
-| Wi-Fi | `<SSID>:wlan0` 自动连上，拿到和换之前同一个网段的地址，没让我重输密码 |
-| 口令 | 仍是更新前那个（可登录） |
-| 数据 | 标记文件、自己装的 `figlet`、包数 1396 全在 |
-| 桌面 | gdm / `user@1000` / gnome-shell / `/run/user/1000/bus` 正常 |
+</details>
+
+<details>
+<summary><b>Q：<code>k50-image activate</code> 拒绝切换，说镜像里没有 <code>k50-image</code>，可镜像明明带着？</b></summary>
+
+假拒绝，`set -euo pipefail` 造成的。原来写的是：
+
+```bash
+unsquashfs -l "$1" 2>/dev/null | grep -qE '/usr/local/sbin/k50-image$' && return 0
+```
+
+`grep` 一命中就退出，`unsquashfs` 收到 SIGPIPE（rc=141），`pipefail` 把整条管道判成失败 ——
+于是"有工具"被判成"没工具"。对任何镜像都拒，所以看起来像"这镜像不合格"。
+
+统一改法（仓库内已全改）：
+
+- `| grep -q X` → `| grep -c X >/dev/null`（读完再判）
+- `| head -1` / `| head -n1` → `| sed -n '1p'`（读完再取）
+- `| head -n N` → `| sed -n "1,${N}p"`
+- 要「第一个匹配行」→ 用单个 `awk`（一个进程，没有管道）
+
+修好之后的行为才是设计意图的：没有 `k50-image` 的镜像被拒绝，`system-current` 不动；
+自拍快照正常切换。
+
+</details>
+
+## 6.6 外放没声音、GNOME 里没有亮度滑块
+
+### 症状
+
+* 声音设置里只有一个「内置音频 · 模拟耳机」，无论怎么调都没声（耳机也没插）。
+* GNOME 里根本没有亮度滑块，`/sys/class/backlight/` 是空目录。
+
+### 声音：这张卡有两个 PCM 播放设备，PipeWire 只认了第一个
+
+`aplay -l` 会看到 `Playback_1`（device 0）和 `Playback_2`（device 2）。真机实测：
+
+* device 0 = **耳机通路**
+* device 2 = **扬声器通路**：DL2 → I2S3 → TFA9874 智能功放 → 喇叭
+  （播放时 dmesg 出 `mt6895_fe_trigger(), DL2 cmd 1`、`tfa98xx_tfa_start() … return (0)`，
+  功放 `speaker_amp 6-0034/6-0035` 是内核里的 `[goodix]` 版驱动，工作正常）
+
+没有 UCM 定义时 PipeWire 只认 device 0，于是系统声音全被送到耳机，耳机没插 → 静音。
+**修法**：仓库带两份 ALSA UCM2 文件（`overlay/usr/share/alsa/ucm2/…`），把 device 2
+暴露成一个独立的「Speaker」输出；功放开关 `Ext_Speaker_Amp Switch` 在 UCM 的
+`EnableSequence` 里打开。装上后 `wpctl status` 会同时列出
+`内置音频 Headphones` 与 `内置音频 Speaker`，默认输出切到 Speaker 即可。
+
+### 亮度：镜像里没带 `k50_bl.ko`
+
+这块面板没有 `/sys/class/backlight`，亮度只能经 `mtkfb_set_backlight_level()` 下发。
+`k50_bl.ko` 是 boot 仓编出来的**外部模块**，vermagic 必须与内核逐字一致，所以只能在
+构建时从内核 CI 的 release 取（`scripts/build-rootfs.sh` 的「4d. 取 k50_bl.ko」，
+可用 `K50_KO_URL` 覆盖 URL）。取不到只是没有亮度滑块，系统照常启动：
+`k50-backlight.service` 有 `ConditionPathExists=/usr/local/lib/k50/k50_bl.ko`，会安静地跳过。
+
+真机验证：把 `k50_bl.ko` 放进 `/usr/local/lib/k50/` 后重启该服务 → `/sys/class/backlight/l11a`
+出现（`brightness` 2047 / `max_brightness` 2047），GNOME 亮度滑块可用。
 
 ## 7. 注意与限制
 
@@ -317,46 +376,7 @@ Wi-Fi bring-up 直接死在这一步。
 
 两者互不影响：换系统不动内核，换内核不动系统 —— 所以出错时能明确定位是谁的问题。
 
-## 9. 事故与自救（2026-10-31 真机）
-
-**事故经过**：把一个「从零构建的干净镜像」当 lower 换上了日常机器。用户看到的现象是
-「整个系统都换成了新的（连 /etc 的改动都没了）」。
-
-**为什么不是丢数据**：可写层 `/data/upper` 一直没被碰过（事故当时 820 MB，`etc`/`home`/
-`root`/`var`/`opt` 都在），旧镜像也还完整躺在 `/images`。overlay 的语义是**上部盖下部**：
-旧系统里凡是「从来没有被改写过」的文件（整个 `/usr`、`/etc` 里的默认值、`/home` 骨架）
-都会被新镜像的同名文件挡住 —— 看起来像全新系统，其实只是被遮住了。
-
-**自救（连 `k50-image` 都没了的时候）**：
-
-```bash
-# 看有哪些镜像、现在是哪个
-readlink /images/system-current
-ls /images/
-
-# 指回旧镜像（k50-image activate 做的就是这两行）
-sudo ln -sfn system-20261030-164732.squashfs /images/system-current.tmp
-sudo mv -Tf /images/system-current.tmp /images/system-current
-sudo reboot
-```
-
-只要 `/data/upper` 还在，切回旧镜像就等于回到事故前的状态（可写层是同一份）。
-
-**现在的三道防线**：
-
-1. `scripts/build-rootfs.sh` 第 4b 步会把 `image-mode/pivot`、`image-mode/k50-image`、
-   `scripts/enable-image-mode.sh`（装成 `/usr/local/sbin/k50-enable-image-mode.sh`）
-   一起打进镜像 —— 换上去之后仍然有 CLI 可以切回来。
-2. `k50-image install` 会检查镜像里有没有 `/usr/local/sbin/k50-image` 并提示；
-   `k50-image activate` 会**直接拒绝**切换这种镜像（除非显式 `--force`），
-   因为那等于把回滚工具丢掉。
-3. 换 lower 前先 `k50-image list` 看清「要切的是不是另一套系统」：包数和体积差异
-   （1123 个包 vs 1395 个包这种事）一眼就能看出来。
-
-**一句话结论**：镜像模式换的是「系统层」，不是「数据」；但把**另一套系统**当系统层，
-用户看到的就是「我的系统没了」。从零构建的干净镜像适合新机器/救援，不适合当日常层。
-
-## 10. 日常更新：从「自己这套系统」打快照（`k50-image snapshot`）
+## 9. 日常更新：从「自己这套系统」打快照（`k50-image snapshot`）
 
 镜像模式的更新循环应该是**同一套系统往前走**，而不是换一套陌生系统：
 
@@ -373,7 +393,7 @@ sudo k50-image activate system-<那个时间戳> && sudo reboot
 ```
 
 为什么强调"自己这套"：换 lower 时，旧系统里**没被改过**的文件会新镜像同名文件被遮住。
-如果新镜像是从零构建的另一套系统，用户看到的就是"我的系统被换掉了"（见 §9 的事故）。
+如果新镜像是从零构建的另一套系统，用户看到的就是"我的系统被换掉了"。
 `snapshot` 打出来的是当前系统的合并视图（只读层 + 可写层里被改过的文件），换上去视觉上
 几乎无感 —— 这正是"更新"该有的样子。
 
@@ -388,80 +408,32 @@ sudo k50-image activate system-<那个时间戳> && sudo reboot
 * 快照体积 ≈ 系统实际占用再压一把（本机 3.5 GB `/usr` → 约 1.3 GB 镜像），
   `/images` 空间不够时先 `k50-image prune`。
 
-## 11. 2026-10-31 真机正面验证「更新不换机」+ 一个 pipefail 陷阱
+## 6.9 音量上键按了没反应（2026-11-01 真机定位，两层）
 
-### 11.1 正面验证：换成**自己系统**的快照
+现象：按音量上完全没反应；音量下能上报但系统里也没反应。
 
-过去换镜像是把「从零 debootstrap 的干净系统」当 lower，等价于换机。现在用
-`k50-image snapshot` 从正在运行的系统打镜像，再换上去：
+**第一层（用户态）：GNOME 没绑这两个键。** 镜像里
+`org.gnome.settings-daemon.plugins.media-keys volume-up = ['']`、
+`volume-down = ['']`（默认应该是 `['XF86AudioRaiseVolume']` / `['XF86AudioLowerVolume']`），
+所以按键即便上报了也没人处理。新增 `k50-volkeys.service` +
+`/usr/local/sbin/k50-volkeys.py`：监听所有输入设备，把
+`KEY_VOLUMEUP`(115) / `KEY_VOLUMEDOWN`(114) 按下转成
+`wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%±`（以 uid 1000 身份调用户的 PipeWire）。
 
-| 指标 | 快照前 | 换成自拍快照 + 重启后 |
-|---|---|---|
-| 已装包数 | 1123 | 1123 |
-| 主机名 | k50-linux | k50-linux |
-| NetworkManager 连接 | Hotspot / 家里 AP | 同 |
-| root 密码哈希前缀 | `$6$…` | 同 |
-| `/home/k50` 条目数 | 23 | 23 |
-| 桌面应用数 | 81 | 81 |
-| 可写层 `/data/upper` | 1.2 GiB | 1.2 GiB |
-| gdm / bluetooth / k50-* 服务 | 全 active | 全 active |
+**第二层（内核态）：音量上的物理键根本没上报。** 这颗 PMIC（MT6363）的
+TOPSTATUS 寄存器里，两个键的电平极性是**相反的**：
 
-对照：换成干净镜像（`system-20261030-185731`）时包数是 **1395**、密码与家目录全变 ——
-那就是 10-30 那次「数据没了」的真实表现。
+| 键 | 位 | 空闲 | 按下 |
+|---|---|---|---|
+| PWRKEY（电源） | bit1 | 1 | 0（active-low） |
+| HOMEKEY（音量上） | bit3 | 0 | 1（active-high） |
 
-### 11.2 陷阱：`set -euo pipefail` + `| grep -q` / `| head -1`
+`drivers/input/misc/mtk-spmi-keys.c` 原来对两位都按 active-low 判定，
+于是按住音量上时被判成"松开"，内核不上报 `KEY_VOLUMEUP`。真机抓包可证：
+按住时内核日志在 `TOPSTATUS = 0x16` / `0x1e` 之间跳（bit3 在变），
+但 evdev 上一个事件都没有。
 
-`k50-image` 的 `image_has_tools()` 原本写：
-
-```bash
-unsquashfs -l "$1" 2>/dev/null | grep -qE '/usr/local/sbin/k50-image$' && return 0
-```
-
-`grep` 一命中就退出，`unsquashfs` 收到 **SIGPIPE（rc=141）**，`pipefail` 把整条管道判成
-失败 → **镜像里明明带着 k50-image，却被判成「没有工具」，`activate` 拒绝切换**。
-真机复现：`bash -c 'set -o pipefail; unsquashfs -l img | grep -q X; echo $?'` → `141`；
-去掉 pipefail → `0`；改用 `grep -c X >/dev/null` → `0`。
-
-统一改法（仓库内已全改）：
-
-- `| grep -q X` → `| grep -c X >/dev/null`（读完再判）
-- `| head -1` / `| head -n1` → `| sed -n '1p'`（读完再取）
-- `| head -n N` → `| sed -n "1,${N}p"`
-- 要「第一个匹配行」→ 用单个 `awk`（一个进程，没有管道）
-
-> 更正一条旧记录：此前写的「`activate` 会拒绝没有工具的镜像，真机实测 rc=1」其实是这个
-> bug 造成的**假拒绝**（对任何镜像都拒）。修复后重新验证：无工具镜像 `185731` → `rc=1`
-> 拒绝且 `system-current` 未动；自拍快照 → `rc=0` 正常切换。
-
-## 6.8 外放没声音、GNOME 里没有亮度滑块（2026-11-01 真机定位）
-
-### 症状
-
-* 声音设置里只有一个「内置音频 · 模拟耳机」，无论怎么调都没声（耳机也没插）。
-* GNOME 里根本没有亮度滑块，`/sys/class/backlight/` 是空目录。
-
-### 声音：这张卡有两个 PCM 播放设备，PipeWire 只认了第一个
-
-`aplay -l` 会看到 `Playback_1`（device 0）和 `Playback_2`（device 2）。真机实测：
-
-* device 0 = **耳机通路**
-* device 2 = **扬声器通路**：DL2 → I2S3 → TFA9874 智能功放 → 喇叭
-  （播放时 dmesg 出 `mt6895_fe_trigger(), DL2 cmd 1`、`tfa98xx_tfa_start() … return (0)`，
-  功放 `speaker_amp 6-0034/6-0035` 是内核里的 `[goodix]` 版驱动，工作正常）
-
-没有 UCM 定义时 PipeWire 只认 device 0，于是系统声音全被送到耳机，耳机没插 → 静音。
-**修法**：仓库带两份 ALSA UCM2 文件（`overlay/usr/share/alsa/ucm2/…`），把 device 2
-暴露成一个独立的「Speaker」输出；功放开关 `Ext_Speaker_Amp Switch` 在 UCM 的
-`EnableSequence` 里打开。装上后 `wpctl status` 会同时列出
-`内置音频 Headphones` 与 `内置音频 Speaker`，默认输出切到 Speaker 即可。
-
-### 亮度：镜像里没带 `k50_bl.ko`
-
-这块面板没有 `/sys/class/backlight`，亮度只能经 `mtkfb_set_backlight_level()` 下发。
-`k50_bl.ko` 是 boot 仓编出来的**外部模块**，vermagic 必须与内核逐字一致，所以只能在
-构建时从内核 CI 的 release 取（`scripts/build-rootfs.sh` 的「4d. 取 k50_bl.ko」，
-可用 `K50_KO_URL` 覆盖 URL）。取不到只是没有亮度滑块，系统照常启动：
-`k50-backlight.service` 有 `ConditionPathExists=/usr/local/lib/k50/k50_bl.ko`，会安静地跳过。
-
-真机验证：把 `k50_bl.ko` 放进 `/usr/local/lib/k50/` 后重启该服务 → `/sys/class/backlight/l11a`
-出现（`brightness` 2047 / `max_brightness` 2047），GNOME 亮度滑块可用。
+修法在 boot 仓
+`patches/0003-input-misc-mtk-spmi-keys-fix-home-key-polarity.patch`
+（顺带补 400 ms 释放宽限：PMIC 在事件后约 185 ms 就清状态位，
+30 ms 轮询会把"按住"上报成连点）。

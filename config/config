@@ -33,6 +33,13 @@ extra_packages=
 # 混进别的东西会被一并 cp 进根文件系统，钉死版本就是为了防这个。
 firmware_tarball=https://github.com/rubens-mt6895-mainline/k50-firmware/archive/f95fef2a945baff4de1f2e6d6e04a5905ca6e299.tar.gz
 
+# ── 内核模块（Wi-Fi / 蓝牙这些 =m 的驱动）──────────────────────
+# boot 分区的内核段只有 ~19.9 MB，MT7921E / BT_HCIUART 这类驱动编进 Image 就塞不下，
+# 所以 k50-boot 的 CI 把它们单独发成 k50-modules-<内核版本>.tar.gz。这里填那个资产的
+# 完整地址，构建时解开装到 /usr/lib/modules 下；留空 = 不带（镜像里没有 Wi-Fi/蓝牙）。
+# 内核版本必须与设备上刷的 boot.img 一致，换内核时这里跟着换。
+modules_tarball=
+
 # ── Release ────────────────────────────────────────────────
 # ci-* 标签保留几个
 keep_releases=8

@@ -303,7 +303,7 @@ for f in "$ROOT/usr/local/lib/k50/pivot" "$ROOT/usr/local/sbin/k50-image"; do
 done
 echo "  k50-image / pivot 已入镜像"
 
-for u in k50-backlight.service k50-bt-agent.service k50-ble-launch.service k50-powerkey.service k50-ssh-keys.service k50-growfs.service; do
+for u in k50-backlight.service k50-bt-agent.service k50-ble-launch.service k50-powerkey.service k50-volkeys.service k50-ssh-keys.service k50-growfs.service; do
 	[ -f "$ROOT/etc/systemd/system/$u" ] && systemctl --root="$ROOT" enable "$u" >/dev/null 2>&1 \
 		&& echo "  enabled $u"
 done
@@ -358,6 +358,21 @@ if command -v curl >/dev/null 2>&1; then
 	fi
 else
 	echo "  警告：没有 curl，跳过 k50_bl.ko"
+fi
+
+# ── 4e. 装内核模块（Wi-Fi / 蓝牙这些 =m 的驱动）──────────────────────────────
+# boot 分区的内核段只有 ~19.9 MB，MT7921E / BT_HCIUART 这类驱动编进 Image 就塞不下，
+# 所以 k50-boot 的 CI 把它们单独发成一个 tar.gz（里面自带 depmod 出来的 modules.dep）。
+# 这个包由 workflow 预先下到 $WORK/modules.tar.gz；解到根下就是 /usr/lib/modules/<版本>/。
+# 取不到不算失败：没有模块 = 没有 Wi-Fi/蓝牙，系统照常启动。
+if [ -s "$WORK/modules.tar.gz" ]; then
+	log "安装内核模块"
+	mkdir -p "$ROOT/usr/lib/modules"
+	tar -xzf "$WORK/modules.tar.gz" -C "$ROOT"
+	KREL_MOD="$(ls -1 "$ROOT/usr/lib/modules" | sed -n '1p')"
+	echo "  → /usr/lib/modules/$KREL_MOD（$(find "$ROOT/usr/lib/modules" -name '*.ko*' | wc -l) 个模块）"
+else
+	echo "  没有 work/modules.tar.gz，跳过（镜像里没有 Wi-Fi/蓝牙模块）"
 fi
 
 # ── 5. 清理（隐私 + 体积）────────────────────────────────────────────────────
