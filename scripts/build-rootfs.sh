@@ -174,6 +174,9 @@ chroot_run /bin/bash -euc "
 	set +x
 	id -u $USERNAME >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash $USERNAME
 	echo '$USERNAME:$PASSWORD' | chpasswd
+	# firstlogin.txt 会作为公开 Release 资产发布，初始口令不能一直有效：
+	# 过期后首次登录（tty / ssh 密码）会被 PAM 逼着改密；公钥登录与 GDM 自动登录不受影响
+	chage -d 0 $USERNAME
 	set -x
 	# 某些组可能还没被任何包创建；缺了就补，否则 usermod 会整体失败
 	for g in sudo audio video plugdev input render netdev bluetooth; do
