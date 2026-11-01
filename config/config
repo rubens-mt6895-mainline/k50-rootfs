@@ -38,7 +38,7 @@ firmware_tarball=https://github.com/rubens-mt6895-mainline/k50-firmware/archive/
 # 所以 k50-boot 的 CI 把它们单独发成 k50-modules-<内核版本>.tar.gz。这里填那个资产的
 # 完整地址，构建时解开装到 /usr/lib/modules 下；留空 = 不带（镜像里没有 Wi-Fi/蓝牙）。
 # 内核版本必须与设备上刷的 boot.img 一致，换内核时这里跟着换。
-modules_tarball=
+modules_tarball=https://github.com/rubens-mt6895-mainline/k50-boot/releases/download/ci-20261101-153939-UTC/k50-modules-7.2.0-gbc95db8659e3-dirty.tar.gz
 
 # ── Release ────────────────────────────────────────────────
 # ci-* 标签保留几个
