@@ -52,6 +52,7 @@ on:
       - 'config/**'
       - 'overlay/**'
       - 'scripts/**'
+      - 'image-mode/**'
       - '.github/workflows/build-rootfs.yml'
 
 permissions:
