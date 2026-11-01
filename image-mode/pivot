@@ -98,6 +98,21 @@ rescue_mode() {
 	cp "$CURRENT" "$RAM_MNT/root.sqfs" || rescue_fail "拷贝镜像到内存失败"
 	logline "内存里的镜像 $(wc -c <"$RAM_MNT/root.sqfs" 2>/dev/null | tr -d ' ') 字节"
 
+	# 盘是坏的，1.8 GB 的读有可能读坏（静默短读/EIO）。有 sidecar 校验值就核一遍：
+	# k50-image 装入镜像时会写 <镜像>.sha256（格式 "<hash>  <文件名>"）。
+	TARGET="$(readlink -f "$CURRENT" 2>/dev/null || true)"
+	[ -n "$TARGET" ] || TARGET="$CURRENT"
+	if [ -f "$TARGET.sha256" ]; then
+		want="$(awk 'NR==1{print $1}' "$TARGET.sha256" 2>/dev/null)"
+		got="$(sha256sum "$RAM_MNT/root.sqfs" 2>/dev/null | awk 'NR==1{print $1}')"
+		if [ -n "$want" ] && [ "$want" != "$got" ]; then
+			rescue_fail "内存里的镜像校验失败（期望 $(printf '%s' "$want" | cut -c1-16)…，实际 $(printf '%s' "$got" | cut -c1-16)…）"
+		fi
+		logline "内存里的镜像 sha256 校验通过：$(printf '%s' "$got" | cut -c1-16)…"
+	else
+		logline "没有 $TARGET.sha256，跳过镜像校验"
+	fi
+
 	dd if=/dev/zero of="$RAM_MNT/up.img" bs=1M count=1536 >/dev/null 2>&1 || rescue_fail "建内存可写层失败"
 
 	LOOP_R=$(losetup -f --show -r "$RAM_MNT/root.sqfs" 2>/dev/null) || rescue_fail "losetup 镜像失败"
@@ -258,14 +273,15 @@ K50_RESCUE_EOF
 logline "启动检查（root=$(cat /proc/cmdline 2>/dev/null)）"
 
 # /proc /sys 是内核交给 init 时唯一没挂的两个（/dev 由 devtmpfs 自动挂）
-logline "启动检查（root=$(cat /proc/cmdline 2>/dev/null)）"
-
-# /proc /sys 是内核交给 init 时唯一没挂的两个（/dev 由 devtmpfs 自动挂）
 mountpoint -q /proc || mount -t proc proc /proc 2>/dev/null || true
 mountpoint -q /sys || mount -t sysfs sysfs /sys 2>/dev/null || true
 
-# 已经在镜像模式的新根里跑了？→ 直接交 systemd
-if grep -q ' / overlay ' /proc/mounts 2>/dev/null; then
+# 已经在镜像模式的新根里跑了？→ 直接交 systemd。
+# 判据要认准「/ 上挂的是我们自己的 overlay（upperdir=$DATA/upper）」；
+# 只看「/ 是 overlay」会误判（WSL 等环境里 / 本身可能就是 overlay）。
+if awk -v u="upperdir=$DATA/upper," \
+	'$2=="/"{ for(i=4;i<=NF;i++) if (index($i,u)==1) { found=1 } } END{ exit !found }' \
+	/proc/mounts 2>/dev/null; then
 	exec "$REAL_INIT"
 fi
 
