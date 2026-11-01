@@ -20,3 +20,10 @@ screen-keyboard-enabled=true
 [org/gnome/desktop/interface]
 enable-animations=true
 clock-show-seconds=true
+
+# 我们自己装的两个 shell 扩展必须显式启用，否则「机身圆角没避让、软键盘最下面一行被裁」。
+# 扩展文件在 /home/k50/.local/share/gnome-shell/extensions 下，但 GNOME 不会自动加载
+# 未在 enabled-extensions 里列出的 uuid（真机实测：不列就是"补丁没生效"的样子）。
+[org/gnome/shell]
+enabled-extensions=['k50-safe-area@k50.local', 'osk-tweak@k50.local']
+disable-user-extensions=false
