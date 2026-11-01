@@ -18,8 +18,8 @@ etc/hostname                    k50-linux（config/config 的 hostname 会覆盖
 etc/bluetooth/main.conf         配对/可发现/GATT 缓存等 K50 上的必要参数
 etc/gdm3/daemon.conf            GDM 自动登录 k50（Wayland）
 etc/dconf/…                     GNOME 系统级默认值（熄屏时间、软键盘等）
-etc/modules-load.d/k50-backlight.conf   开机自动 modprobe k50_bl
-etc/systemd/system/k50-*.service|timer  K50 专属单元（电源键、蓝牙、背光）
+etc/systemd/system/k50-*.service|timer  K50 专属单元（电源键、蓝牙、背光、开机扩容）
+usr/local/sbin/k50-growfs.sh    开机把根分区扩满（镜像被 resize2fs -M 收缩过，不扩会写满）
 usr/local/sbin/k50-*.py|sh      K50 专属脚本（电源键守护、蓝牙回连、LE 初始化）
 usr/local/sbin/bt_agent.py      蓝牙配对代理（NoInputNoOutput，自动接受）
 usr/local/lib/k50/README.txt    /usr/local/lib/k50 用途说明（k50_bl.ko 会装在这里）

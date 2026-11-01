@@ -287,7 +287,8 @@ fi
 
 [ -x "$REAL_INIT" ] || fallback "找不到 $REAL_INIT"
 [ -e "$MARKER" ] || fallback "镜像模式未启用（没有 $MARKER）"
-[ -e "$CURRENT" ] || fallback "没有当前镜像（$CURRENT）"
+# 注意：$CURRENT 不存在**不是**错误 —— 那是"刷完 img 第一次开机"的正常状态，
+# 此时把引导层自己当只读下层跑（见下面的 FIRSTBOOT 分支）。
 
 # 救援请求（修文件系统用；不带这个文件就走正常流程）
 [ -f "$RESCUE_FLAG" ] && rescue_mode
@@ -300,11 +301,22 @@ mkdir -p "$RO_MNT" "$NEW_MNT" || fallback "建不了挂载点"
 mountpoint -q "$RO_MNT" && umount -l "$RO_MNT" 2>/dev/null
 mountpoint -q "$NEW_MNT" && umount -l "$NEW_MNT" 2>/dev/null
 
-LOOP="$(losetup -f --show -r "$CURRENT" 2>/dev/null)" || fallback "losetup 失败（$CURRENT）"
-[ -n "$LOOP" ] || fallback "losetup 没给出 loop 设备"
-logline "镜像 $CURRENT → $LOOP"
-
-mount -t squashfs -o ro "$LOOP" "$RO_MNT" 2>/dev/null || fallback "挂 squashfs 失败"
+FIRSTBOOT=0
+if [ -n "$CURRENT" ] && [ -e "$CURRENT" ]; then
+	LOOP="$(losetup -f --show -r "$CURRENT" 2>/dev/null)" || fallback "losetup 失败（$CURRENT）"
+	[ -n "$LOOP" ] || fallback "losetup 没给出 loop 设备"
+	logline "镜像 $CURRENT → $LOOP"
+	mount -t squashfs -o ro "$LOOP" "$RO_MNT" 2>/dev/null || fallback "挂 squashfs 失败"
+else
+	# 首开：还没有任何系统镜像（CI 预置的 img 就长这样，$CURRENT 还没有）。
+	# 把引导层自己绑定挂载成只读下层 —— 系统照样跑在 overlay 上，用户的改动
+	# 全部落进 $DATA/upper；等哪天 k50-image activate 一个 squashfs，下层才真正
+	# 换成"系统镜像"，而可写层里的东西一直都在（更新不换机）。
+	# 注：upper/work 与 lower 在同一个 ext4 里（嵌套），本内核允许（真机验过）。
+	FIRSTBOOT=1
+	mount --bind / "$RO_MNT" || fallback "绑定引导层失败"
+	logline "首开：还没有系统镜像，用引导层本身当只读下层（$RO_MNT）"
+fi
 # index=off 必须要有：overlayfs 默认会去校验「upper 根的 origin」是否等于当前 lower 根，
 # 我们在换镜像时 lower 变了，校验失败 → mount 直接报 Stale file handle 挂不上。
 # （实测：换 lower 后不带 index=off 时 rc=32，dmesg 里是 "failed to verify upper root origin"）
@@ -316,6 +328,12 @@ mount -t overlay overlay \
 for f in /usr/lib/systemd/systemd /sbin/init /usr/bin/mount /etc/fstab; do
 	[ -e "$NEW_MNT$f" ] || fallback "新根里缺 $f"
 done
+
+if [ "$FIRSTBOOT" = 1 ]; then
+	logline "首开完成：/ = overlay(引导层 + $DATA/upper)，还没有系统镜像；用户的改动都在 $DATA/upper 里"
+else
+	logline "镜像模式已启动：/ = overlay($CURRENT + $DATA/upper)"
+fi
 
 # 厂商固件补齐：CI 打出来的镜像里没有 soc7_0_ram_*.bin / WIFI_RAM_CODE_* 这类
 # 小米/MTK 二进制（版权原因不进仓库）。它们放在 $DATA/firmware（启用时从引导层拷过来），

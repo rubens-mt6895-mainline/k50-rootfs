@@ -29,8 +29,11 @@
 ```bash
 zstd -d k50-rootfs-trixie.img.zst -c | dd of=/dev/sdc86 bs=4M oflag=direct status=progress
 sync
-sudo resize2fs /dev/sdc86   # 重启进系统后，把文件系统扩满分区
 ```
+
+镜像已经**预置好镜像模式**：第一次开机就以引导层为只读下层跑在 overlay 上，之后所有改动
+都写进 `/data/upper`（可写层）；分区也会被自动扩满（`k50-growfs.service`）。所以既不需要
+手工 `resize2fs`，也不需要先"启用镜像模式"。
 
 ## 首次登陆
 
@@ -60,7 +63,7 @@ sudo OUTPUTS=img,tar ./scripts/build-rootfs.sh   # 只出部分产物（默认 i
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `suite` | `trixie` | Debian 13；`bookworm` = 12 |
-| `image_size_gib` | `8` | 构建后自动收缩到实际大小，刷完 `resize2fs` 扩回 |
+| `image_size_gib` | `8` | 构建后自动收缩到实际大小；刷完首开由 `k50-growfs.service` 自动扩满 |
 | `image_label` | `k50rootfs` | 必须与 overlay 里 `/etc/fstab` 的 `LABEL=` 一致 |
 | `hostname` / `username` | `k50-linux` / `k50` | |
 | `password` | 空 = 随机 | 见上节 |
@@ -75,22 +78,28 @@ CI 用 `ubuntu-24.04-arm`（公开仓库免费）。参数含义的完整注释�
 
 ## 系统升级（镜像模式）
 
-系统层是只读 squashfs，所有改动放在 `/data` 的 overlay；更新系统 = 更换一个
-squashfs + 重启。如果新系统无法启动就 `k50-image rollback` 切回上一个，`/data` 原样不动：
+镜像**出厂就已经在镜像模式里**：`/` 是 overlay，只读下层先是引导层本身、装上第一个
+系统镜像后是那个 squashfs，所有改动都在 `/data/upper`。因此更新系统 = 放一个新 squashfs
+进 `/images` 再 `activate` + 重启，`/data` 原样不动；新系统起不来就 `rollback`：
 
 ```bash
-sudo ./scripts/enable-image-mode.sh --dry-run    # 先干跑确认情况
-sudo ./scripts/enable-image-mode.sh --yes && sudo reboot
-sudo k50-image snapshot && sudo k50-image activate system-<时间戳> && sudo reboot
+sudo k50-image install /tmp/k50-rootfs-trixie.squashfs   # 也可以直接给 URL
+sudo k50-image activate system-<时间戳> && sudo reboot
+# 起不来：开机进得去就 sudo k50-image rollback && sudo reboot
 ```
+
+`scripts/enable-image-mode.sh` 是给**已经装好的普通系统**补上镜像模式用的（先把当前系统
+打成第一个 squashfs 当 lower），全新刷入的 img 不需要它。
 
 ## 首次开机
 
-1. 桌面自动登录后 `passwd`（初始密码随机，见上）。
-2. `sudo resize2fs /dev/sdc86` 扩满分区。
-3. WiFi：`nmtui`。触摸 / WiFi / 蓝牙固件已在镜像里（来自 k50-firmware），开箱可用；想换成自己 dump 的一份见 [docs/FLASH.md](docs/FLASH.md)。
-4. 背光：安装 [k50-boot](https://github.com/rubens-mt6895-mainline/k50-boot) 里的 `k50_bl.ko`（放 `/usr/local/lib/k50/`），`sudo systemctl start k50-backlight`。
-5. K50 没有 RTC：联网后 systemd-timesyncd + fake-hwclock 几秒内对时；apt 报证书错误通常是时间不对，重启 timesyncd 即可。
+1. 桌面已经自动登录。想用密码登录（tty/ssh）时用 `firstlogin.txt` 里的口令，首次登录会被
+   强制改密（`chage -d 0`）；改密后一切照旧（GDM 自动登录不受影响）。
+2. WiFi：`nmtui`（镜像里不预置任何 WiFi 口令）。
+3. 分区扩容自动做（`k50-growfs.service`），`df -h /` 应看到接近 225 G 的容量。
+4. 触摸 / WiFi / 蓝牙固件已在镜像里（来自 k50-firmware），开箱可用；想换成自己 dump 的一份见 [docs/FLASH.md](docs/FLASH.md)。
+5. 背光：安装 [k50-boot](https://github.com/rubens-mt6895-mainline/k50-boot) 里的 `k50_bl.ko`（放 `/usr/local/lib/k50/`），`sudo systemctl start k50-backlight`。
+6. K50 没有 RTC：联网后 systemd-timesyncd + fake-hwclock 几秒内对时；apt 报证书错误通常是时间不对，重启 timesyncd 即可。
 
 ## 已知限制
 

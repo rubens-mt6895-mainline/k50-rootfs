@@ -1,0 +1,18 @@
+[Unit]
+Description=把根分区扩满（CI 镜像被 resize2fs -M 缩过）
+Documentation=https://github.com/rubens-mt6895-mainline/k50-rootfs
+DefaultDependencies=no
+After=local-fs.target systemd-remount-fs.service
+Before=sysinit.target
+ConditionPathIsReadWrite=/
+ConditionVirtualization=!container
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 失败不阻塞开机：脚本内部已经把各种失败都吞成 exit 0
+ExecStart=/usr/local/sbin/k50-growfs.sh
+TimeoutStartSec=3min
+
+[Install]
+WantedBy=sysinit.target

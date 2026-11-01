@@ -47,9 +47,20 @@ sync
 
 ### 刷完第一次开机
 
+镜像已经**预置成镜像模式**：第一次开机就以引导层为只读下层跑在 overlay 上，
+之后所有改动都写进 `/data/upper`（可写层）——所以以后用 `k50-image activate`
+换系统镜像时，你的改动不会被带走。
+
+不需要任何手工步骤：
+
+* **扩容自动做**：`k50-growfs.service` 开机把 ext4 扩满分区（幂等）。镜像本身是被
+  `resize2fs -M` 收缩过的 ~3.9 GB，不扩会在写满时把 gdm 憋死（`No space left on device`）。
+* **初始口令在 Release 附件 `firstlogin.txt`**（`user=k50`，口令每次构建随机生成）。
+  首次用**密码**登录（tty 或 ssh）时会被强制改密；GDM 自动登录不受影响
+  （`/etc/pam.d/gdm-autologin` 与 `/etc/pam.d/systemd-user` 已对 k50 加了例外）。
+
 ```bash
-sudo resize2fs /dev/sdc86     # 镜像被 resize2fs -M 收缩过，先扩满分区
-passwd                        # 初始密码是公开的 k50，立刻改
+ssh k50@k50-linux     # 首次登录会要求改密；也可以接键盘在 tty 上 passwd
 ```
 
 ## 三、刷内核（k50-boot 仓库的产物）

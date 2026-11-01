@@ -209,6 +209,32 @@ cp -a "$REPO/overlay/." "$ROOT/"
 		fi
 	done' "$ROOT" {} + )
 
+# PAM：`chage -d 0`（首登强制改密）会让 PAM 的 account 阶段把「口令已过期」判成认证失败，
+# 于是 GDM 自动登录起不了会话、systemd --user 也以 status=224/PAM 失败。真机症状：
+# 屏幕停在文字控制台（所有单元都 OK）、gnome-shell 没起、/run/user/1000/bus 不存在
+# （gnome-shell 只好退化用 /tmp/dbus-* 私有总线，电源键 daemon 调总线就全失败）。
+# 这里只对本地自动登录/用户管理器放行 $USERNAME 一个用户；ssh/tty 的口令登录走
+# /etc/pam.d/sshd → common-account，过期检查照样生效（首登仍然强制改密）。
+log "PAM：让自动登录与用户管理器跳过「口令过期」检查"
+PAM_LINE="account  sufficient pam_succeed_if.so user = $USERNAME"
+if [ -f "$ROOT/etc/pam.d/gdm-autologin" ] && ! grep -qxF "$PAM_LINE" "$ROOT/etc/pam.d/gdm-autologin"; then
+	sed -i "s|^@include[[:space:]]*common-account|$PAM_LINE\n@include common-account|" \
+		"$ROOT/etc/pam.d/gdm-autologin"
+	echo "  gdm-autologin：已插入例外"
+fi
+# systemd --user 用的是 /etc/pam.d/systemd-user；基础镜像只提供 /usr/lib/pam.d/systemd-user
+if [ -f "$ROOT/usr/lib/pam.d/systemd-user" ] && [ ! -f "$ROOT/etc/pam.d/systemd-user" ]; then
+	{
+		echo "# K50：放过 $USERNAME 的口令过期检查，否则 user@.service 以 224/PAM 失败、"
+		echo "# /run/user/1000/bus 不会出现。见 scripts/build-rootfs.sh。"
+		sed "s|^@include[[:space:]]*common-account|$PAM_LINE\n@include common-account|" \
+			"$ROOT/usr/lib/pam.d/systemd-user"
+	} >"$ROOT/etc/pam.d/systemd-user"
+	chmod 0644 "$ROOT/etc/pam.d/systemd-user"
+	chown root:root "$ROOT/etc/pam.d/systemd-user"
+	echo "  systemd-user：已生成带例外的 /etc/pam.d/systemd-user"
+fi
+
 # 合并额外文件不能写成 cp -a "$EXTRA_DIR/." "$ROOT/"：trixie 的 /lib 是 → usr/lib 的
 # 符号链接，cp 把"目录拷到符号链接上"当错误直接 abort（CI 实测：
 # cp: cannot overwrite non-directory '.../rootfs/./lib' with directory '.../extra/./lib'）。
@@ -277,7 +303,7 @@ for f in "$ROOT/usr/local/lib/k50/pivot" "$ROOT/usr/local/sbin/k50-image"; do
 done
 echo "  k50-image / pivot 已入镜像"
 
-for u in k50-backlight.service k50-bt-agent.service k50-ble-launch.service k50-powerkey.service k50-ssh-keys.service; do
+for u in k50-backlight.service k50-bt-agent.service k50-ble-launch.service k50-powerkey.service k50-ssh-keys.service k50-growfs.service; do
 	[ -f "$ROOT/etc/systemd/system/$u" ] && systemctl --root="$ROOT" enable "$u" >/dev/null 2>&1 \
 		&& echo "  enabled $u"
 done
@@ -294,6 +320,27 @@ if command -v dconf >/dev/null 2>&1 || [ -x "$ROOT/usr/bin/dconf" ]; then
 else
 	log "警告：没有 dconf-cli，overlay 里的 dconf 默认值不会生效"
 fi
+
+# ── 4c. 预置镜像模式（刷完第一次开机就已经在 overlay 上）──────────────────────
+# 目的：用户的所有改动从第一次开机起就落在可写层 /data/upper 里，之后
+# `k50-image activate` 换下层（系统镜像）不会把改动带走 —— 这就是"更新不换机"。
+# 首开时还没有任何系统镜像（这里**故意不**造 /images/system-current），pivot 会把
+# 引导层自己当只读下层跑（见 image-mode/pivot 的 FIRSTBOOT 分支）。
+log "预置镜像模式"
+mkdir -p "$ROOT/images" "$ROOT/data/upper" "$ROOT/data/work"
+: >"$ROOT/images/enabled"
+# 镜像模式专用 fstab：去掉根分区那一行（/ 被 overlay 占着，不能再让 systemd 去挂）
+grep -vE '^[[:space:]]*[^#[:space:]]+[[:space:]]+/[[:space:]]' "$ROOT/etc/fstab" >"$ROOT/data/fstab.image"
+# /usr/sbin/init → pivot。路径与 enable-image-mode.sh 保持一致（REAL_INIT/DIVERTED），
+# 这样那个脚本的 --revert 和重装逻辑照样能认出来。pivot 在镜像模式关闭时会自己
+# exec /usr/lib/systemd/systemd 回落，所以普通启动也不受影响。
+if [ ! -e "$ROOT/usr/sbin/init.systemd" ]; then
+	chroot_run dpkg-divert --add --rename --divert /usr/sbin/init.systemd /usr/sbin/init \
+		|| echo "  警告：dpkg-divert 失败（继续，pivot 照样装上去）"
+fi
+ln -sfn /usr/local/lib/k50/pivot "$ROOT/usr/sbin/init"
+[ -e "$ROOT/sbin/init" ] || ln -sfn ../usr/sbin/init "$ROOT/sbin/init"
+echo "  /images/enabled + /data/{upper,work,fstab.image} 已预置，/usr/sbin/init → pivot"
 
 # ── 5. 清理（隐私 + 体积）────────────────────────────────────────────────────
 log "清理"
@@ -388,8 +435,11 @@ log "写 BUILD.txt / SHA256SUMS.txt"
 	echo "packages    : $(wc -l <"$OUT/packages.txt")"
 	echo "host        : $(uname -srm) / $(command -v mmdebstrap >/dev/null && mmdebstrap --version 2>/dev/null | sed -n '1p')"
 	echo
-	echo "刷机：把 .img.zst 解压后 dd 到 userdata（K50 上是 /dev/sdc86），"
-	echo "     开机进系统后 resize2fs /dev/sdc86 扩满分区。详见 docs/FLASH.md"
+	echo "刷机：把 .img.zst 解压后 dd 到 userdata（K50 上是 /dev/sdc86），详见 docs/FLASH.md"
+	echo "     首次开机会自己把分区扩满（k50-growfs.service），不再需要手工 resize2fs"
+	echo "镜像模式：已预置（/images/enabled 在位、/usr/sbin/init → pivot）。首开以引导层"
+	echo "     为只读下层跑在 overlay 上，用户的改动全部落在 /data/upper；"
+	echo "     之后 install 一个 .squashfs 再 activate，下层才换成系统镜像。"
 	echo "更新：把 .squashfs 放进设备的 /images/，用 k50-image activate 切换，详见 docs/UPDATE.md"
 } >"$OUT/BUILD.txt"
 
