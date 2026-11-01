@@ -162,6 +162,29 @@ def dpms_on():
         return True
 
 
+def hold_wake(seconds):
+    """在后台按住 GNOME 的 idle 抑制剂 seconds 秒（不阻塞主循环）。
+
+    gnome-session-inhibit 的抑制只在该进程存活期间有效，所以用 sleep 撑住这段时间；
+    进程退出即自动解除，不需要记 cookie。
+    """
+    secs = max(1, int(seconds))
+    cmd = ["gnome-session-inhibit", "--inhibit", "idle",
+           "--reason", "k50-powerkey wake hold", "sleep", str(secs)]
+    for wrap in PRIVDROP:
+        try:
+            return subprocess.Popen(wrap + cmd, env=ENV,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            log("hold_wake failed: %s" % e)
+            return None
+    log("hold_wake: 找不到 setpriv/runuser")
+    return None
+
+
 # ---- GNOME 空闲熄屏兜底（v6, 2026-11-01）----------------------------------
 # 现象（用户 2026-11-01 00:00 报「屏幕没关，能看到老化的绿线」）：空闲到
 # idle-delay 之后 GNOME 有时**完全不激活屏保**。boot -4（23:42:56→00:02:13，
@@ -171,6 +194,22 @@ def dpms_on():
 # 所以本进程自己盯它，超时后走与电源键熄屏完全相同的路径。
 IDLE_FALLBACK = os.environ.get("K50_IDLE_FALLBACK", "1") == "1"
 IDLE_GRACE = float(os.environ.get("K50_IDLE_GRACE", "30"))
+# 长按电源键 → GNOME 关机菜单：默认关。
+# 真机事故（2026-11-01 15:21）：长按 2 s 弹出 gnome-session-quit 的关机对话框，
+# 再长按一次 GNOME 把第二次请求当成"确认"→ 立刻关机；对话框自己还有 ~60 s
+# 自动确认。这台机器接着充电器时 MTK 会自动上电，于是表现为"开机后自动关机"。
+# 需要旧行为时在单元里设 K50_POWER_DIALOG=1。
+POWER_DIALOG = os.environ.get("K50_POWER_DIALOG", "0") == "1"
+# 启动初期忽略按键：冷启动时电源键往往刚松开，避免把开机动作当成长按。
+START_GRACE = float(os.environ.get("K50_START_GRACE", "15"))
+
+# 唤醒后的"保持期"（v8, 2026-11-01 23:10 真机）：按电源键点亮后 3 秒，GNOME 又按
+# 旧 idle 状态把屏幕灭了 —— 唤醒本身**不重置** logind 的空闲计时；而 GNOME 48 的
+# org.gnome.ScreenSaver 没有 SimulateUserActivity，内核也没开 CONFIG_INPUT_UINPUT
+# （没有 /dev/uinput），无法注入"真实"输入事件。唯一有效手段是
+# org.gnome.SessionManager.Inhibit(flag=8 = idle)：实测 Inhibit 后 30 秒屏幕仍 On，
+# 不 Inhibit 则 3 秒内熄灭。
+WAKE_HOLD = float(os.environ.get("K50_WAKE_HOLD", "60"))
 _session_id = None
 _delay_cache = [0.0, 300]
 
@@ -301,6 +340,7 @@ def main():
 
     press_t = None
     last_toggle = 0.0
+    wake_until = 0.0
     poll_t = 0.0
     idle_poll = 0.0
 
@@ -312,27 +352,36 @@ def main():
         log("screen -> OFF")
 
     def screen_on(why):
-        nonlocal last_toggle
+        nonlocal last_toggle, wake_until
         screensaver_set(False)
         bl.on()
         last_toggle = time.time()
-        log("screen -> ON (%s)" % why)
+        # 唤醒不重置 idle 计时，不顶住就会被 GNOME（以及下面的兜底）立刻灭掉。
+        wake_until = time.time() + WAKE_HOLD
+        hold_wake(WAKE_HOLD)
+        log("screen -> ON (%s, 保持 %ds 不被空闲熄屏)" % (why, int(WAKE_HOLD)))
         bt_reconnect()
 
     def blank_fallback():
         """GNOME 没按 idle 熄屏时的兜底：屏保若已 active 但屏幕还亮着（GNOME
         卡在那个状态），先取消再重来 —— 否则 SetActive(true) 是空操作，
         屏幕永远不会真的灭。"""
+        if time.time() < wake_until:
+            # 刚被电源键点亮，别自己把它灭掉（唤醒不重置 idle，否则 3 秒就黑）。
+            return
         if screensaver_active():
             log("fallback: screensaver 已 active 但屏幕仍亮，先复位再熄")
             screensaver_set(False)
             time.sleep(0.5)
         screen_off()
 
-    log("watching power key only, long threshold %d ms, dpms=%s, idle fallback=%s(%s+%ds)"
+    start_t = time.time()
+    log("watching power key only, long threshold %d ms, dpms=%s, idle fallback=%s(%s+%ds), "
+        "power dialog=%s, start grace=%.0fs"
         % (LONG_MS, "on" if dpms_on() else "off",
            "on" if IDLE_FALLBACK else "off",
-           "%ds" % idle_delay_seconds(), int(IDLE_GRACE)))
+           "%ds" % idle_delay_seconds(), int(IDLE_GRACE),
+           "on" if POWER_DIALOG else "off", START_GRACE))
 
     while True:
         r, _, _ = select.select([fd], [], [], 0.2)
@@ -342,7 +391,11 @@ def main():
         if press_t is not None and press_t is not False:
             if (now - press_t) * 1000 >= LONG_MS:
                 press_t = False
-                show_power_dialog()
+                if POWER_DIALOG:
+                    show_power_dialog()
+                else:
+                    log("长按电源键 %.1fs（关机菜单已禁用，K50_POWER_DIALOG=1 可恢复）"
+                        % (LONG_MS / 1000.0))
 
         # 看门狗：屏幕本该亮着却还是 0 亮度（面板重初始化等）→ 补回来
         if now - poll_t > 0.5:
@@ -374,6 +427,9 @@ def main():
                 if ev != EV_KEY or code != KEY_POWER:
                     continue
                 if val == 1:
+                    if time.time() - start_t < START_GRACE:
+                        log("key down (启动 %.0fs 内，忽略)" % (time.time() - start_t))
+                        continue
                     press_t = time.time()
                     log("key down")
                 elif val == 0:
