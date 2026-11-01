@@ -82,6 +82,10 @@ cmd_status() {
 		echo "下次启动用：$(basename "$(readlink -f "$CURRENT")")"
 	elif [ -e "$CURRENT" ]; then
 		echo "下次启动用：$(basename "$CURRENT")"
+	elif [ -e "$MARKER" ]; then
+		# 预置镜像模式刷完还没装过镜像：pivot 会把引导层自己绑定挂载成只读下层，
+		# 改动照样写进 $UPPER，所以重开还是镜像模式，不是退回普通启动。
+		echo "下次启动用：（还没有系统镜像 → 首开模式：引导层当只读下层，改动写 $UPPER）"
 	else
 		echo "下次启动用：（未设置，重启会退回普通启动）"
 	fi
