@@ -144,7 +144,12 @@ cmd_install() {
 	case "$src" in
 		http://*|https://*)
 			info "下载 $src"
-			curl -fL --retry 3 --progress-bar -o "$tmp" "$src" || die "下载失败"
+			# GitHub 在部分线路上下载 1.2 GB 会被中途掐断（实测 curl: (35) TLS ...
+			# unexpected eof while reading）。因此：--retry-all-errors 覆盖 TLS/传输错误，
+			# -C - 让重试续传而不是从头再来（文件已存在时从断点接着写）。
+			curl -fL --progress-bar --retry 5 --retry-delay 3 --retry-all-errors \
+				-C - -o "$tmp" "$src" \
+				|| die "下载失败（重跑同一条命令会续传）"
 			;;
 		*)
 			[ -f "$src" ] || die "文件不存在：$src"
