@@ -14,19 +14,31 @@
 #      绝不能因为扩容失败卡住开机（最多回到"盘是满的"这个旧状态）。
 set -u
 
-DEV="$(findmnt -no SOURCE / 2>/dev/null || true)"
+# 找「真正的根文件系统」所在的块设备。
+# 普通模式：/ 自己就是块设备；镜像模式：/ 是 overlay，真身在 /data（同一分区上的 bind
+# 挂载，一定在）；再退一步是 /mnt/.oldroot（旧根还没被卸载时才在）。
+# 坑：绝不能对 "overlay" 这种非路径值跑 readlink -f —— 会被解析成 /overlay，
+# 于是报「/overlay 不是块设备，跳过」，扩容静默失效（实测踩过）。
+find_root_dev() {
+	for p in / /data /images /mnt/.oldroot; do
+		[ -e "$p" ] || continue
+		src="$(findmnt -no SOURCE --target "$p" 2>/dev/null || true)"
+		src="${src%%\[*}"            # /dev/sda1[/subvol] → /dev/sda1
+		case "$src" in
+			/dev/*) ;;           # 只有路径形状的才可能是设备
+			*) continue ;;       # overlay / tmpfs / none … 跳过
+		esac
+		src="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+		if [ -b "$src" ]; then
+			printf '%s' "$src"
+			return 0
+		fi
+	done
+	return 1
+}
 
-# 镜像模式：/ 是 overlay，真身在 /mnt/.oldroot；普通模式：/ 直接是块设备
-case "$DEV" in
-	""|overlay|tmpfs|none)
-		DEV="$(findmnt -no SOURCE /mnt/.oldroot 2>/dev/null || true)"
-		;;
-esac
-[ -n "$DEV" ] || DEV="$(awk '$2=="/"{print $1}' /proc/mounts 2>/dev/null | sed -n '1p')"
-# overlay 的 SOURCE 形如 "overlay"；带子卷的形如 "/dev/sda1[/subvol]"
-DEV="${DEV%%\[*}"
-[ -n "$DEV" ] || { echo "k50-growfs: 找不到根设备，跳过"; exit 0; }
-DEV="$(readlink -f "$DEV" 2>/dev/null || echo "$DEV")"
+DEV="$(find_root_dev)" || true
+[ -n "${DEV:-}" ] || { echo "k50-growfs: 找不到根设备，跳过"; exit 0; }
 
 if [ ! -b "$DEV" ]; then
 	echo "k50-growfs: $DEV 不是块设备，跳过"

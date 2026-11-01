@@ -279,9 +279,12 @@ mountpoint -q /sys || mount -t sysfs sysfs /sys 2>/dev/null || true
 # 已经在镜像模式的新根里跑了？→ 直接交 systemd。
 # 判据要认准「/ 上挂的是我们自己的 overlay（upperdir=$DATA/upper）」；
 # 只看「/ 是 overlay」会误判（WSL 等环境里 / 本身可能就是 overlay）。
-if awk -v u="upperdir=$DATA/upper," \
-	'$2=="/"{ for(i=4;i<=NF;i++) if (index($i,u)==1) { found=1 } } END{ exit !found }' \
+# 注意 /proc/mounts 把挂载选项整个塞在第 4 字段里（逗号分隔），必须把整行按逗号切开
+# 再找精确的 `upperdir=$DATA/upper`；直接拿字段前缀比较永远匹配不上（实测踩过）。
+if awk -v u="upperdir=$DATA/upper" \
+	'$2=="/"{ n=split($0,a,","); for(i=1;i<=n;i++) if (a[i]==u) { found=1 } } END{ exit !found }' \
 	/proc/mounts 2>/dev/null; then
+	logline "已经在镜像模式的根里（$DATA/upper 就是 / 的可写层），直接交 systemd"
 	exec "$REAL_INIT"
 fi
 
@@ -388,4 +391,7 @@ logline "pivot_root → 新根（可写层 $DATA/upper）"
 pivot_root . mnt/.oldroot 2>/dev/null || fallback "pivot_root 失败"
 
 logline "交给 systemd"
-exec chroot . /sbin/init
+# 绝对不要 exec /sbin/init：镜像模式预置进 img 之后 /sbin/init 就是本脚本自己
+# （dpkg-divert 留下的软链），那样会无限自我重入、叠出多层 overlay —— 实测叠到第三层
+# 时内核报 `maximum fs stacking depth exceeded`，落地是 gdm 起不来、/etc 写不进去。
+exec chroot . "$REAL_INIT"

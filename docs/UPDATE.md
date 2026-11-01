@@ -181,6 +181,23 @@ overlayfs: failed to verify upper root origin      ← 真正的原因
 同一次真跑里 `--revert` 也验过了：开关删除、`/usr/sbin/init` 还原成 `../lib/systemd/systemd`、
 `dpkg-divert --list` 清空、`/data` 用户数据与 `/images` 里的镜像都保留。
 
+### 6.5.1 预置镜像模式（出厂即镜像模式）排练抓到的三个坑（2026-11-01，已修）
+
+| 症状 | 根因 | 修法 |
+| --- | --- | --- |
+| 开机时 `pivot` 自我重入 3 次、叠出 3 层 overlay，内核报 `overlayfs: maximum fs stacking depth exceeded`；随后 GDM / `user@1000` 全挂、`/root` 连文件都写不进去 | `pivot` 结尾原来写的是 `exec chroot . /sbin/init`，而预置镜像模式把 `/sbin/init` divert 成了 `pivot` 自己 → 无限自我重入（老系统没这问题，因为那里的 `/sbin/init` 仍是 `../lib/systemd/systemd`） | 改成 `exec chroot . "$REAL_INIT"`（`REAL_INIT=/usr/lib/systemd/systemd`），并加注释警告**绝对不要**写回 `/sbin/init` |
+| 上面的重入之所以能发生，是因为"已经在我们自己的 overlay 里就直接交 systemd"的守卫**从来没生效过** | `/proc/mounts` 把全部挂载选项塞在 `$4` 一个字段里（`rw,relatime,lowerdir=…,upperdir=/data/upper,workdir=…`），而守卫写的是 `for(i=4;i<=NF;i++) if (index($i,u)==1)` —— 要求"某个字段以 `upperdir=/data/upper,` 开头"，永远匹配不上 | 改成按逗号 `split($0,a,",")` 切开、逐 token 精确比对，命中时打印"已经在镜像模式的根里…" |
+| `k50-growfs.service` active 却什么都没做，日志 `k50-growfs: /overlay 不是块设备，跳过` | 镜像模式下 `findmnt -no SOURCE /` 返回 `overlay`，脚本又对非路径值做了 `readlink -f` → 变成 `/overlay`，`[ -b ]` 判否 | 改成 `find_root_dev()`：按 `/ → /data → /images → /mnt/.oldroot` 顺序试 `findmnt -no SOURCE --target`，只接受 `/dev/*` 形状再 `readlink -f` + `[ -b ]`，找不到就打"找不到根设备，跳过" |
+
+处理这三个坑时还踩了两个运维坑：设备当时已经处于三层 overlay 的病态里，往 `/usr/local/lib/k50/`
+写文件会 `ENOENT`/`EEXIST`（写 overlay 上层失败），而 **`/data/..` 不能用来摸引导层**（bind 挂载的
+`..` 会解析回合并根，又被坏 overlay 拒绝）。唯一可靠的引导层真身路径是 `findmnt` 里那个
+device-backed 挂载点（当时是 `/mnt/.oldroot/mnt/.oldroot`，源 `/dev/sdc86`），直接往那里 `cp` 才改得动本体。
+
+修好后真机复核：`pivot` 日志单次（启动检查→首开→首开完成→pivot_root→交给 systemd 各 1 次）、
+`overlay` 挂载数 = 1、无内核告警、`gdm`/`user@1000`/`gnome-shell`/`/run/user/1000/bus` 全部正常、
+`k50-growfs` 打出 `/dev/sdc86 已经占满（231063 MiB），无需扩容`。
+
 ## 6.6 换镜像后 SSH 进不去（主机密钥不跟着镜像走）
 
 真机上换到「全新构建的镜像」后遇到过：SSH 端口能连上、但连接立刻被关闭、读不到 banner。
