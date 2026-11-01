@@ -232,6 +232,57 @@ sshd: no hostkeys available -- exiting
 sudo ssh-keygen -A && sudo systemctl restart ssh
 ```
 
+## 6.7 换镜像后 Wi-Fi 密码、蓝牙固件也没了（2026-11-01 真机定位）
+
+换到「全新构建的镜像」之后遇到两台设备上最要命的现象：**Wi-Fi 列表里没有任何已保存的
+网络**，得重新输密码；蓝牙也打不开。都不是镜像做坏了，是两个东西没跟着数据走：
+
+**① 网络配置（Wi-Fi/热点 profile）**
+
+`/etc/NetworkManager/system-connections/*.nmconnection` 原本只存在于**引导层**（ext4）。
+换成 squashfs 当 lower 之后，新根的 `/etc` 来自 squashfs，里面没有这些文件；而可写层里
+如果存在 0 字节的同名文件，它会把下层那份完好的 profile **盖住** —— NM 读出空的 psk，
+于是像新设备一样问密码。
+
+更坑的是：不能在 activate 阶段"把 profile 搬进可写层"。合并视图里 `stat` 一个被 0 字节
+文件盖住的文件会返回**错误的大小**（说有内容、`read` 出来 0 字节），照抄就把好文件清成
+0 字节，越更新越坏（这个坑真机上踩过一次，用户的 profile 被我清了两回）。
+
+现在的做法：`image-mode/pivot` 在 `pivot_root` **之前**（此时 `/` 还是引导层真 ext4，
+读到的一定是原件）把非空的 `*.nmconnection` 播种到 `/data/persist/nm`（只补缺、不覆盖、
+幂等），删掉其中的 0 字节垃圾，再把 `$DATA/persist/nm` **bind** 到新根的
+`/etc/NetworkManager/system-connections`。换任何 lower 都不影响，仓库里也不带任何口令。
+
+**② 厂商固件（MTK 的 Wi-Fi/BT blob）**
+
+厂商 ramdisk 里的 `CINIT`（minimal init）会按**裸文件名**把 MTK 固件拷到 `/lib/firmware`
+顶层（`soc7_0_ram_wmmcu_1b_t_1_hdr.bin`、`WIFI_RAM_CODE_soc7_0_1b_t_1.bin`、
+`st_fts_L11a.ftb` 等），设备自己生成的 `mediatek/mt6895/WIFI`(NVRAM)、`BT_Addr` 也只
+落在引导层。首开模式（lower 就是引导层）当然看得到；换成 squashfs 之后就变成
+`Direct firmware load for soc7_0_ram_wmmcu_1b_t_1_hdr.bin failed with error -2`，
+Wi-Fi bring-up 直接死在这一步。
+
+现在的做法：pivot 在挂固件叠加层之前，用 `cp -a -n /usr/lib/firmware/. $DATA/firmware/`
+把**当前根**的整份固件预置到 `/data/firmware`（只补缺、不覆盖，一次即可、之后持久），
+再照旧用它当固件叠加层的第一 lower。
+
+**③ SSH 公钥**
+
+同上，镜像里没有 `/root/.ssh/authorized_keys`，换 lower 之后就进不去了。pivot 现在会在
+`pivot_root` 之前依次从 `$DATA/persist/authorized_keys`、可写层、引导层找现成的公钥补进
+新根（只在新根里没有或为空时才补）。
+
+验收（2026-11-01 真机，换成 CI 的 `system-20261101-103857.squashfs` 之后）：
+
+| 检查 | 结果 |
+| --- | --- |
+| 根 | `overlay`，`lowerdir=/var/lib/k50/ro`、`upperdir=/data/upper` |
+| 网络配置 | `findmnt` 显示 `/dev/sdc86[/data/persist/nm]` bind 到 `/etc/NetworkManager/system-connections`，profile 302/274 字节（不再 0） |
+| Wi-Fi | `tenda-5:wlan0` 自动连上，`10.140.181.68/24`，没让我重输密码 |
+| 口令 | 仍是更新前那个（可登录） |
+| 数据 | 标记文件、自己装的 `figlet`、包数 1396 全在 |
+| 桌面 | gdm / `user@1000` / gnome-shell / `/run/user/1000/bus` 正常 |
+
 ## 7. 注意与限制
 
 * 内核/引导镜像（boot.img）不在镜像模式范围内 —— 换内核仍是刷 `/dev/sdc43`，见 `k50-boot` 仓库。
