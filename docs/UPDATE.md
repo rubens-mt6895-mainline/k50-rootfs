@@ -278,7 +278,7 @@ Wi-Fi bring-up 直接死在这一步。
 | --- | --- |
 | 根 | `overlay`，`lowerdir=/var/lib/k50/ro`、`upperdir=/data/upper` |
 | 网络配置 | `findmnt` 显示 `/dev/sdc86[/data/persist/nm]` bind 到 `/etc/NetworkManager/system-connections`，profile 302/274 字节（不再 0） |
-| Wi-Fi | `tenda-5:wlan0` 自动连上，`10.140.181.68/24`，没让我重输密码 |
+| Wi-Fi | `<SSID>:wlan0` 自动连上，拿到和换之前同一个网段的地址，没让我重输密码 |
 | 口令 | 仍是更新前那个（可登录） |
 | 数据 | 标记文件、自己装的 `figlet`、包数 1396 全在 |
 | 桌面 | gdm / `user@1000` / gnome-shell / `/run/user/1000/bus` 正常 |
@@ -399,8 +399,8 @@ sudo k50-image activate system-<那个时间戳> && sudo reboot
 |---|---|---|
 | 已装包数 | 1123 | 1123 |
 | 主机名 | k50-linux | k50-linux |
-| NetworkManager 连接 | Hotspot / tenda-5 | 同 |
-| root 密码哈希前缀 | `$6$Fk7TsyxD…` | 同 |
+| NetworkManager 连接 | Hotspot / 家里 AP | 同 |
+| root 密码哈希前缀 | `$6$…` | 同 |
 | `/home/k50` 条目数 | 23 | 23 |
 | 桌面应用数 | 81 | 81 |
 | 可写层 `/data/upper` | 1.2 GiB | 1.2 GiB |
