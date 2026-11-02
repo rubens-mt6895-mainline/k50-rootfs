@@ -367,10 +367,22 @@ fi
 # 取不到不算失败：没有模块 = 没有 Wi-Fi/蓝牙，系统照常启动。
 if [ -s "$WORK/modules.tar.gz" ]; then
 	log "安装内核模块"
-	mkdir -p "$ROOT/usr/lib/modules"
-	tar -xzf "$WORK/modules.tar.gz" -C "$ROOT"
-	KREL_MOD="$(ls -1 "$ROOT/usr/lib/modules" | sed -n '1p')"
-	echo "  → /usr/lib/modules/$KREL_MOD（$(find "$ROOT/usr/lib/modules" -name '*.ko*' | wc -l) 个模块）"
+	MODX="$WORK/modules-extract"
+	rm -rf "$MODX"
+	mkdir -p "$MODX"
+	tar -xzf "$WORK/modules.tar.gz" -C "$MODX"
+	# 包里顶层是 ./lib/modules/…，而 trixie 的 /lib 是指向 usr/lib 的符号链接。
+	# 直接 tar -C "$ROOT" 解包时 tar 会把那个符号链接换成真目录，于是
+	# /lib/ld-linux-aarch64.so.1 没了，之后每条 chroot 命令都报
+	# chroot: failed to run command '/usr/bin/env': No such file or directory
+	# （CI 实测：run 41374649110，6a05592）。所以和 4d 一样改用 merge_extra，
+	# 碰到符号链接就解析到真实目录再往里拷。
+	merge_extra "$MODX" "$ROOT"
+	rm -rf "$MODX"
+	MODN="$(find "$ROOT/usr/lib/modules" -name '*.ko*' 2>/dev/null | wc -l)"
+	KREL_MOD="$(ls -1 "$ROOT/usr/lib/modules" 2>/dev/null | sed -n '1p')"
+	[ "$MODN" -gt 0 ] || { echo "::error::work/modules.tar.gz 里没解出任何 .ko"; exit 1; }
+	echo "  → /usr/lib/modules/$KREL_MOD（$MODN 个模块）"
 else
 	echo "  没有 work/modules.tar.gz，跳过（镜像里没有 Wi-Fi/蓝牙模块）"
 fi
