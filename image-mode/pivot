@@ -327,8 +327,11 @@ mount -t overlay overlay \
 	-o "lowerdir=$RO_MNT,upperdir=$DATA/upper,workdir=$DATA/work,index=off" "$NEW_MNT" 2>/dev/null ||
 	fallback "挂 overlay 失败"
 
-# 新根里检查几个"起不来就完了"的路径
-for f in /usr/lib/systemd/systemd /sbin/init /usr/bin/mount /etc/fstab; do
+# 新根里检查几个"起不来就完了"的路径。
+# 注意不要检查 /sbin/init：镜像里 /sbin/init 可能就是 pivot 自己，或者是预置镜像模式
+# 那个 bug 留下的自指软链（1102 镜像就是 `/usr/sbin/init -> ../usr/sbin/init`），
+# 跟"这个镜像能不能起"无关；真正被 exec 的是 $REAL_INIT。
+for f in /usr/lib/systemd/systemd /usr/bin/mount /etc/fstab; do
 	[ -e "$NEW_MNT$f" ] || fallback "新根里缺 $f"
 done
 

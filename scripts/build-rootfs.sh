@@ -339,7 +339,14 @@ if [ ! -e "$ROOT/usr/sbin/init.systemd" ]; then
 		|| echo "  警告：dpkg-divert 失败（继续，pivot 照样装上去）"
 fi
 ln -sfn /usr/local/lib/k50/pivot "$ROOT/usr/sbin/init"
-[ -e "$ROOT/sbin/init" ] || ln -sfn ../usr/sbin/init "$ROOT/sbin/init"
+# 千万别再写 `[ -e "$ROOT/sbin/init" ] || ln -sfn ../usr/sbin/init "$ROOT/sbin/init"`：
+# $ROOT/sbin 是 → usr/sbin 的软链，而 $ROOT/usr/sbin/init 指向 /usr/local/lib/k50/pivot
+# 这个「绝对」路径；在宿主机上 -e 测它会去宿主机找 /usr/local/lib/k50/pivot（不存在）
+# → 判 false → 于是把刚建好的 $ROOT/usr/sbin/init 覆盖成自指软链（1102 镜像就这么坏的）。
+_initlink="$(readlink "$ROOT/usr/sbin/init" 2>/dev/null || true)"
+if [ "$_initlink" != "/usr/local/lib/k50/pivot" ]; then
+	echo "  警告：\$ROOT/usr/sbin/init 没指向 pivot（实际：${_initlink:-空}）"
+fi
 echo "  /images/enabled + /data/{upper,work,fstab.image} 已预置，/usr/sbin/init → pivot"
 
 # ── 4d. 取 k50_bl.ko（背光）─────────────────────────────────────────────────
