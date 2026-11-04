@@ -13,7 +13,7 @@
   所以按键能上报、内核一直在打 TOPSTATUS，但没有东西处理它
   —— 表现就是"按音量上没反应"。
 
-本程序只做一件事：监听所有输入设备，遇到音量上/下各调 5%，通过 wpctl 调
+本程序只做一件事：监听所有输入设备，遇到音量上/下各调 2%（可被 K50_VOLUME_STEP 覆盖，并且 120ms 内只认一次），通过 wpctl 调
 桌面用户的 PipeWire。不 grab（不抢 GNOME 的输入），失败只记日志，不阻塞开机。
 """
 import glob
@@ -26,7 +26,8 @@ import time
 
 KEY_VOLUMEDOWN = 114
 KEY_VOLUMEUP = 115
-STEP = os.environ.get("K50_VOLUME_STEP", "5%")
+STEP = os.environ.get("K50_VOLUME_STEP", "2%")
+LAST = [0.0]      # 上次调音量的时刻，用来限速
 UID = int(os.environ.get("K50_UID", "1000"))
 RUNTIME = os.environ.get("K50_RUNTIME_DIR", "/run/user/1000")
 PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -127,6 +128,10 @@ def main():
                 # 只处理按下；value=2 是长按重复，跳过（否则按住会飞音量）
                 if typ != EV_KEY or val != KEY_PRESS:
                     continue
+                now = time.time()
+                if now - LAST[0] < 0.12:
+                    continue          # 同一批事件里只认一次，避免一次按键吃好几次
+                LAST[0] = now
                 if code == KEY_VOLUMEUP:
                     set_volume(STEP + "+")
                 elif code == KEY_VOLUMEDOWN:

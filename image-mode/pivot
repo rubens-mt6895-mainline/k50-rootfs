@@ -445,6 +445,24 @@ fi
 # （真机踩过：换成 CI 镜像后只能改用普通用户+口令登录）。这里在 pivot 之前从
 # 引导层 / 可写层 / $DATA/persist 三处找现成的公钥补进新根；只在新根里没有
 # （或为空）时才补，不覆盖镜像自带的。
+seed_stateful() {
+	# 更换只读层（换镜像）后，用户状态必须跟过来，否则会「数据保留爆炸」：
+	# 家庭目录、口令、蓝牙配对、NetworkManager 连接、音频/账户缓存全丢。
+	# 只在可写层缺这一项时，从引导层（此刻还挂在 /）播一次，之后永远用可写层的。
+	SEED_LIST="home/k50 root etc/shadow etc/passwd etc/group etc/gshadow etc/subuid etc/subgid etc/machine-id var/lib/bluetooth var/lib/NetworkManager var/lib/AccountsService var/lib/alsa"
+	SEED_N=0
+	for rel in $SEED_LIST; do
+		src="/$rel"
+		dst="$DATA/upper/$rel"
+		[ -e "$src" ] || continue
+		[ -e "$dst" ] && continue
+		mkdir -p "$(dirname "$dst")" 2>/dev/null || continue
+		cp -a "$src" "$dst" 2>/dev/null && SEED_N=$((SEED_N + 1))
+	done
+	[ "$SEED_N" -gt 0 ] && logline "用户状态：从引导层播种 $SEED_N 项到 $DATA/upper（家目录/口令/蓝牙/网络/音频），换镜像不丢数据"
+	return 0
+}
+
 restore_keys() {
 	_dst="$1"
 	shift
@@ -466,6 +484,7 @@ restore_keys "$NEW_MNT/root/.ssh/authorized_keys" \
 	"$DATA/upper/root/.ssh/authorized_keys" \
 	"/root/.ssh/authorized_keys" || true
 restore_keys "$NEW_MNT/home/k50/.ssh/authorized_keys" \
+seed_stateful   # 换 lower 后把用户状态播到可写层
 	"$DATA/persist/k50-authorized_keys" \
 	"$DATA/upper/home/k50/.ssh/authorized_keys" \
 	"/home/k50/.ssh/authorized_keys" || true
