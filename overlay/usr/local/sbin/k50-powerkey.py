@@ -67,6 +67,15 @@ ENV = {
 # 于是 SetActive 一直被静默丢弃：熄屏看着"能用"（背光被写成 0），
 # 唤醒却永远点不亮（DPMS 仍是 off），表现就是"息屏久了电源键失效、只有蓝牙有效"。
 # 所以凡是要跟 org.gnome.* 说话的地方，都必须先降权到 k50。
+# 2026-11-06 真机事故：gnome-shell 有时**不在**标准用户总线上（/run/user/1000/bus），
+# 而是退化到自己的 /tmp/dbus-XXXX 私有总线（user@1000 起晚 / gdm 重启时序）。
+# 此时硬编码地址调 org.gnome.ScreenSaver 会一直 5 s 超时；更糟的是空闲兜底
+# 仍按"屏保没 active"去熄屏 —— 屏幕被按黑，而唤醒同样调不通，
+# 表现就是"屏幕又按不亮"。所以：
+#   ① 每 15 s 从 gnome-shell 的 /proc/<pid>/environ 读真实总线地址并跟上；
+#   ② 连续 3 次总线调用失败就暂停空闲兜底（宁可不熄屏，也不制造黑屏）。
+BUS = {"addr": "unix:path=/run/user/1000/bus", "fail": 0, "hold": False}
+
 USER_UID = int(os.environ.get("K50_USER_UID", "1000"))
 PRIVDROP = [["setpriv", "--reuid=%d" % USER_UID, "--regid=%d" % USER_UID,
              "--init-groups"],
@@ -129,18 +138,59 @@ class PanelBL:
         return self.set(self.gnome_level())
 
 
+_bus_poll = [0.0]
+
+
+def refresh_bus_address():
+    """节流 15 s：从 gnome-shell 的 /proc/<pid>/environ 取真实 DBUS_SESSION_BUS_ADDRESS。"""
+    now = time.time()
+    if now - _bus_poll[0] < 15:
+        return
+    _bus_poll[0] = now
+    try:
+        out = subprocess.run(["pgrep", "-f", "/usr/bin/gnome-shell"],
+                             capture_output=True, text=True, timeout=3).stdout
+        pids = [x for x in out.split() if x.isdigit()]
+    except Exception:
+        return
+    for pid in pids:
+        try:
+            with open("/proc/%s/environ" % pid, "rb") as f:
+                for item in f.read().split(b"\x00"):
+                    if item.startswith(b"DBUS_SESSION_BUS_ADDRESS="):
+                        addr = item.split(b"=", 1)[1].decode("utf-8", "replace")
+                        if addr and addr != BUS["addr"]:
+                            log("总线地址跟随 gnome-shell(%s)：%s -> %s"
+                                % (pid, BUS["addr"], addr))
+                            BUS["addr"] = addr
+                            ENV["DBUS_SESSION_BUS_ADDRESS"] = addr
+                        return
+        except OSError:
+            continue
+
+
 def _screensaver_call(method, *args):
     """调用 org.gnome.ScreenSaver 的方法（降权后执行）。成功返回 stdout，失败返回 None。"""
+    refresh_bus_address()
     cmd = ["busctl", "--user", "call",
            "org.gnome.ScreenSaver", "/org/gnome/ScreenSaver",
            "org.gnome.ScreenSaver", method] + list(args)
     r = run_as_user(cmd)
-    if r is None:
+    if r is None or r.returncode != 0:
+        if r is not None:
+            log("%s 失败 rc=%d %s" % (method, r.returncode,
+                                      (r.stderr or r.stdout or "").strip()[:160]))
+        BUS["fail"] += 1
+        if BUS["fail"] >= 3 and not BUS["hold"]:
+            BUS["hold"] = True
+            log("连续 %d 次调不通 GNOME 总线（%s）→ 暂停空闲兜底，避免把屏幕按黑唤不醒"
+                % (BUS["fail"], BUS["addr"]))
         return None
-    if r.returncode != 0:
-        log("%s 失败 rc=%d %s" % (method, r.returncode,
-                                  (r.stderr or r.stdout or "").strip()[:160]))
-        return None
+    if BUS["fail"] or BUS["hold"]:
+        if BUS["hold"]:
+            log("GNOME 总线恢复（%s），空闲兜底重新启用" % BUS["addr"])
+        BUS["fail"] = 0
+        BUS["hold"] = False
     return (r.stdout or "").strip()
 
 
@@ -211,7 +261,7 @@ START_GRACE = float(os.environ.get("K50_START_GRACE", "15"))
 # 不 Inhibit 则 3 秒内熄灭。
 WAKE_HOLD = float(os.environ.get("K50_WAKE_HOLD", "60"))
 _session_id = None
-_delay_cache = [0.0, 300]
+_delay_cache = [0.0, None]
 
 
 def wayland_session_id():
@@ -289,15 +339,16 @@ def idle_delay_seconds():
                 _delay_cache[0] = now
                 _delay_cache[1] = int(tok)
                 return _delay_cache[1]
-    return _delay_cache[1]
+    return _delay_cache[1] or None
 
 
 def show_power_dialog():
     # 必须以 k50 身份在其 session bus 上调用；root 直接跑 gnome-session-quit
     # 会在 session bus 上拿不到会话（现象：日志有记录但屏幕无对话框）。
+    refresh_bus_address()
     cmd = ("XDG_RUNTIME_DIR=/run/user/1000 "
-           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
-           "DISPLAY=:0 gnome-session-quit --power-off")
+           "DBUS_SESSION_BUS_ADDRESS=%s "
+           "DISPLAY=:0 gnome-session-quit --power-off" % BUS["addr"])
     try:
         r = subprocess.run(["su", "-", "k50", "-c", cmd],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -369,6 +420,8 @@ def main():
         if time.time() < wake_until:
             # 刚被电源键点亮，别自己把它灭掉（唤醒不重置 idle，否则 3 秒就黑）。
             return
+        if BUS["hold"]:
+            return
         if screensaver_active():
             log("fallback: screensaver 已 active 但屏幕仍亮，先复位再熄")
             screensaver_set(False)
@@ -376,11 +429,12 @@ def main():
         screen_off()
 
     start_t = time.time()
+    d0 = idle_delay_seconds()
     log("watching power key only, long threshold %d ms, dpms=%s, idle fallback=%s(%s+%ds), "
         "power dialog=%s, start grace=%.0fs"
         % (LONG_MS, "on" if dpms_on() else "off",
            "on" if IDLE_FALLBACK else "off",
-           "%ds" % idle_delay_seconds(), int(IDLE_GRACE),
+           ("%ds" % d0) if d0 else "未知", int(IDLE_GRACE),
            "on" if POWER_DIALOG else "off", START_GRACE))
 
     while True:
@@ -411,7 +465,7 @@ def main():
             if dpms_on():
                 delay = idle_delay_seconds()
                 idle = idle_seconds()
-                if idle is not None and idle > delay + IDLE_GRACE:
+                if delay is not None and idle is not None and idle > delay + IDLE_GRACE:
                     log("GNOME 未按 idle 熄屏（空闲 %.0fs > %ds），由本进程兜底"
                         % (idle, delay))
                     blank_fallback()
