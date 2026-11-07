@@ -10,7 +10,9 @@
 唤醒**不再**由本进程代劳：键盘/鼠标/触摸的输入 GNOME 自己会把面板点亮
 （lcm_prepare → lcm_panel_init 重发全表 → 恢复亮度）。本进程代劳的旧做法会在
 熄屏后 1~2 s 被蓝牙鼠标的连接/上报事件弹回来，表现为电源键按了没反应，故删除。
-本进程处理电源键与音量键：event2 被 EVIOCGRAB 独占，GNOME 收不到事件，只能由这里转发（音量键 2026-11-07 加入，调 PipeWire 默认 sink）。
+本进程默认**不**独占 event2（K50_POWERKEY_GRAB=0）：按键照常流过 GNOME，音量键由 gsd-media-keys 处理，
+屏幕上才有和别处一致的音量胶囊提示与提示音。只有把 K50_POWERKEY_GRAB 设成 1 时才 EVIOCGRAB 独占，
+此时代价是 GNOME 收不到该设备上的任何键，音量键必须由本进程代为转发（见 vol_step）。
 
 DPMS 的 sysfs（/sys/class/drm/card0-DSI-1/dpms）仍是 0444，userspace 写不了，
 所以熄屏只能请 GNOME 代劳。
@@ -42,12 +44,15 @@ import time
 
 EV_KEY = 1
 KEY_POWER = 116
-# 2026-11-07：本进程 EVIOCGRAB 独占 event2，非电源键必须自己转发，
-# 否则音量键到不了 GNOME（驱动已能正确上报 code 115，但被这里吞掉）。
+# 2026-11-07：只有 K50_POWERKEY_GRAB=1 独占 event2 时，音量键才需要自己转发
+# （驱动已能正确上报 code 115，独占后 GNOME 收不到，必须这里补）。
+# 默认 GRAB=0：音量键交给 GNOME，才有原生 OSD 胶囊 + 提示音。
 KEY_VOLUMEDOWN = 114
 KEY_VOLUMEUP = 115
 VOL_STEP = os.environ.get("K50_VOLUME_STEP", "5%")
 VOL_MIN_GAP = float(os.environ.get("K50_VOLUME_GAP", "0.15"))
+# 是否 EVIOCGRAB 独占 event2；默认 0 = 把信号留给 GNOME
+GRAB = os.environ.get("K50_POWERKEY_GRAB") == "1"
 _vol_last = [0.0]
 LONG_MS = int(os.environ.get("K50_LONG_MS", "2000"))
 DEV = "/dev/input/event2"
@@ -399,7 +404,7 @@ def main():
         log("cannot open %s: %s" % (DEV, e))
         return 1
 
-    if os.environ.get("K50_POWERKEY_GRAB") == "1":
+    if GRAB:
         try:
             fcntl.ioctl(fd, 0x40044590, 1)
             log("grabbed " + DEV)
@@ -506,7 +511,8 @@ def main():
                 if ev != EV_KEY:
                     continue
                 if code in (KEY_VOLUMEUP, KEY_VOLUMEDOWN):
-                    if val == 1:
+                    # 只有独占模式才代转；不独占时 GNOME 自己处理，别重复调
+                    if GRAB and val == 1:
                         vol_step(code)
                     continue
                 if code != KEY_POWER:

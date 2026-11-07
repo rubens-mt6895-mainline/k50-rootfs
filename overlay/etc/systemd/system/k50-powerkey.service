@@ -11,7 +11,7 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 Environment=DISPLAY=:0
 Environment=PYTHONUNBUFFERED=1
-Environment=K50_POWERKEY_GRAB=1
+Environment=K50_POWERKEY_GRAB=0
 # 等会话总线就绪
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -S /run/user/1000/bus ] && exit 0; sleep 1; done; exit 0'
 ExecStart=/usr/bin/python3 /usr/local/sbin/k50-powerkey.py
