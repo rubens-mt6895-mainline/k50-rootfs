@@ -10,7 +10,7 @@
 唤醒**不再**由本进程代劳：键盘/鼠标/触摸的输入 GNOME 自己会把面板点亮
 （lcm_prepare → lcm_panel_init 重发全表 → 恢复亮度）。本进程代劳的旧做法会在
 熄屏后 1~2 s 被蓝牙鼠标的连接/上报事件弹回来，表现为电源键按了没反应，故删除。
-本进程只处理电源键：event2 被 EVIOCGRAB 独占，GNOME 收不到，只能由这里转发。
+本进程处理电源键与音量键：event2 被 EVIOCGRAB 独占，GNOME 收不到事件，只能由这里转发（音量键 2026-11-07 加入，调 PipeWire 默认 sink）。
 
 DPMS 的 sysfs（/sys/class/drm/card0-DSI-1/dpms）仍是 0444，userspace 写不了，
 所以熄屏只能请 GNOME 代劳。
@@ -42,6 +42,13 @@ import time
 
 EV_KEY = 1
 KEY_POWER = 116
+# 2026-11-07：本进程 EVIOCGRAB 独占 event2，非电源键必须自己转发，
+# 否则音量键到不了 GNOME（驱动已能正确上报 code 115，但被这里吞掉）。
+KEY_VOLUMEDOWN = 114
+KEY_VOLUMEUP = 115
+VOL_STEP = os.environ.get("K50_VOLUME_STEP", "5%")
+VOL_MIN_GAP = float(os.environ.get("K50_VOLUME_GAP", "0.15"))
+_vol_last = [0.0]
 LONG_MS = int(os.environ.get("K50_LONG_MS", "2000"))
 DEV = "/dev/input/event2"
 DPMS = "/sys/class/drm/card0-DSI-1/dpms"
@@ -367,6 +374,24 @@ def bt_reconnect():
         log("bt-reconnect trigger failed: %s" % e)
 
 
+def vol_step(code):
+    """按一次音量键调一档。以 uid 1000 身份调 wpctl（root 连不上会话总线）。"""
+    now = time.time()
+    if now - _vol_last[0] < VOL_MIN_GAP:
+        return
+    _vol_last[0] = now
+    delta = VOL_STEP + ("+" if code == KEY_VOLUMEUP else "-")
+    try:
+        subprocess.run(["runuser", "-u", "k50", "--",
+                        "/usr/bin/env", "XDG_RUNTIME_DIR=/run/user/1000",
+                        "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", delta],
+                       env=dict(os.environ, **ENV), timeout=3,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        log("volume %s (%s)" % ("up" if code == KEY_VOLUMEUP else "down", delta))
+    except Exception as e:      # 调音量失败绝不影响电源键逻辑
+        log("volume step failed: %s" % e)
+
+
 def main():
     try:
         fd = open(DEV, "rb", buffering=0)
@@ -478,7 +503,13 @@ def main():
             while i + 24 <= len(data):
                 _, _, ev, code, val = struct.unpack_from("llHHi", data, i)
                 i += 24
-                if ev != EV_KEY or code != KEY_POWER:
+                if ev != EV_KEY:
+                    continue
+                if code in (KEY_VOLUMEUP, KEY_VOLUMEDOWN):
+                    if val == 1:
+                        vol_step(code)
+                    continue
+                if code != KEY_POWER:
                     continue
                 if val == 1:
                     if time.time() - start_t < START_GRACE:
