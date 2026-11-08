@@ -126,6 +126,66 @@ jobs:
           fi
           mmdebstrap --version
 
+      - name: 准备下载助手
+        run: |
+          set -euo pipefail
+          cat > work/fetch.py <<'PYEOF'
+          #!/usr/bin/env python3
+          """从别仓 Release 取资产。
+
+          github.com/.../releases/download/<tag>/<file> 这条重定向链会随 CDN 节点
+          抽风（实测 504 / 88 秒只吐 54 KB 后 502），而 api.github.com 的 asset
+          端点同一时刻 2.8 秒就下完了。所以这里把 release 下载地址翻译成 asset
+          id 再走 API 端点。
+
+          认两种 URL：
+            https://github.com/<owner>/<repo>/releases/download/<tag>/<file>
+            https://github.com/<owner>/<repo>/archive/<ref>.tar.gz   (codeload，原样下)
+          非 github.com 的 URL 原样下。
+          """
+          import json, os, re, sys, urllib.request
+
+          src, dst = sys.argv[1], sys.argv[2]
+          m = re.match(
+              r"^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$",
+              src,
+          )
+          if not m:
+              # archive/<ref>.tar.gz 走 codeload，不是 release asset，直接下
+              req = urllib.request.Request(src, headers={"User-Agent": "k50-rootfs-ci"})
+              with urllib.request.urlopen(req, timeout=300) as r, open(dst, "wb") as f:
+                  while chunk := r.read(1 << 20):
+                      f.write(chunk)
+              sys.exit(0)
+
+          owner, repo, tag, name = m.groups()
+          hdrs = {"User-Agent": "k50-rootfs-ci", "Accept": "application/vnd.github+json"}
+          tok = os.environ.get("GITHUB_TOKEN")
+          if tok:
+              hdrs["Authorization"] = "Bearer " + tok
+
+          url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+          req = urllib.request.Request(url, headers=hdrs)
+          with urllib.request.urlopen(req, timeout=60) as r:
+              rel = json.load(r)
+
+          hit = [a for a in rel.get("assets", []) if a["name"] == name]
+          if not hit:
+              have = ", ".join(a["name"] for a in rel.get("assets", []))
+              sys.exit(f"release {tag} 里没有 {name}；现有资产：{have}")
+          asset_id = hit[0]["id"]
+          print(f"release {tag} -> asset {name} id={asset_id} size={hit[0]['size']}")
+
+          hdrs["Accept"] = "application/octet-stream"
+          url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
+          req = urllib.request.Request(url, headers=hdrs)
+          with urllib.request.urlopen(req, timeout=600) as r, open(dst, "wb") as f:
+              while chunk := r.read(1 << 20):
+                  f.write(chunk)
+          PYEOF
+          chmod +x work/fetch.py
+          python3 --version
+
       - name: 取厂商固件
         run: |
           set -euo pipefail
@@ -135,7 +195,8 @@ jobs:
             exit 0
           fi
           mkdir -p work/extra
-          curl -fsSL --retry 3 -o work/firmware.tar.gz "$URL"
+          python3 work/fetch.py "$URL" work/firmware.tar.gz
+          echo "固件包 $(stat -c%s work/firmware.tar.gz) 字节"
           tar -xzf work/firmware.tar.gz -C work/extra --strip-components=1
           echo "固件文件数：$(find work/extra -type f | wc -l)"
           ls work/extra/lib/firmware
@@ -149,9 +210,14 @@ jobs:
             exit 0
           fi
           mkdir -p work
-          curl -fsSL --retry 3 -o work/modules.tar.gz "$URL"
+          python3 work/fetch.py "$URL" work/modules.tar.gz
           echo "模块包 $(stat -c%s work/modules.tar.gz) 字节"
           tar -tzf work/modules.tar.gz | sed -n '1,5p'
+          # 没有 .ko 说明包是空壳或下坏了，别把空目录打进镜像
+          if ! tar -tzf work/modules.tar.gz | grep -q '\.ko$'; then
+            echo "::error::模块包里一个 .ko 都没有"
+            exit 1
+          fi
 
       - name: 构建 rootfs
         env:

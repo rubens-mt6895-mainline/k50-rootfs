@@ -175,6 +175,67 @@ export default class OskTweakExtension extends Extension {
         };
         proto._origOpenForOskTweak = this._origOpen;
 
+        // ---- 锁屏点键报错兜底 ----
+        // GNOME 48.7 的 keyboard.js:1165 会做
+        //     const actor = global.stage.get_event_actor(event);
+        //     if (Main.layoutManager.keyboardBox.contains(actor) || ...)
+        // 而 get_event_actor() 在锁屏（UnlockDialog 抓事件）时可能返回 null，
+        // 于是 contains(null) 抛 "Argument descendant may not be null"。
+        // 这个异常会让 UnlockDialog.vfunc_captured_event 整个中断，
+        // 表现就是「锁屏软键盘看得见，但点键一个字都打不进去」。
+        // 这里包一层：actor 为 null 时改用坐标命中测试，仍把事件转发给按键。
+        const mgr = Main.keyboard;
+        if (mgr && typeof mgr.maybeHandleEvent === "function") {
+            this._kbdMgr = mgr;
+            this._origMaybeHandle = mgr.maybeHandleEvent;
+            mgr._origMaybeHandleForOskTweak = this._origMaybeHandle;
+            mgr.maybeHandleEvent = function (event) {
+                let actor = null;
+                try {
+                    actor = global.stage.get_event_actor(event);
+                } catch (e) {
+                    actor = null;
+                }
+
+                if (actor)
+                    return this._origMaybeHandleForOskTweak.call(this, event);
+
+                const box = Main.layoutManager.keyboardBox;
+                if (!box)
+                    return false;
+
+                let hit = null;
+                try {
+                    const [x, y] = event.get_coords();
+                    hit = global.stage.get_actor_at_pos(
+                        Clutter.PickMode.REACTIVE, x, y);
+                } catch (e) {
+                    return false;
+                }
+
+                if (!hit)
+                    return false;
+
+                let onKeyboard = false;
+                try {
+                    onKeyboard = box.contains(hit);
+                } catch (e) {
+                    onKeyboard = false;
+                }
+                if (!onKeyboard && !hit._extendedKeys && !hit.extendedKey)
+                    return false;
+
+                try {
+                    hit.event(event, true);
+                    hit.event(event, false);
+                } catch (e) {
+                    console.warn("[osk-tweak] 兜底转发按键失败: " + e);
+                    return false;
+                }
+                return true;
+            };
+        }
+
         // ---- 记录最近一次触摸 ----
         this._capturedId = global.stage.connect('captured-event', (_stage, event) => {
             const t = event.type();
@@ -260,6 +321,14 @@ export default class OskTweakExtension extends Extension {
         if (this._origOpen)
             proto.open = this._origOpen;
         delete proto._origOpenForOskTweak;
+
+        if (this._kbdMgr) {
+            if (this._origMaybeHandle)
+                this._kbdMgr.maybeHandleEvent = this._origMaybeHandle;
+            delete this._kbdMgr._origMaybeHandleForOskTweak;
+            this._kbdMgr = null;
+            this._origMaybeHandle = null;
+        }
 
         const kb = Main.keyboard?._keyboard;
         if (kb) {
