@@ -129,6 +129,7 @@ jobs:
       - name: 准备下载助手
         run: |
           set -euo pipefail
+          mkdir -p work
           cat > work/fetch.py <<'PYEOF'
           #!/usr/bin/env python3
           """从别仓取发布物。
