@@ -142,21 +142,92 @@ jobs:
           认三种 URL：
             /<owner>/<repo>/releases/download/<tag>/<file>  -> API asset 端点
             /<owner>/<repo>/archive/<ref>.tar.gz            -> API tarball 端点
-          其它 URL 用 curl 原样下（带 --retry）。
+            其它 URL                                         -> curl
+
+          两种情况都先要求拿到 302 或 200，对 5xx / 429 / 连接错误按 1、2、4、8、
+          16、32、64 秒退避重试。api.github.com 本身也会偶发 504 / 503（实测无
+          token 时 11 秒吐 54 KB 的 504 页），跟具体文件无关，重试一次就过去了，
+          没必要让整条构建在第一步死掉。
           """
-          import json, os, re, subprocess, sys, urllib.request
+          import json, os, re, shutil, subprocess, sys, time
+          import urllib.error, urllib.request
 
           src, dst = sys.argv[1], sys.argv[2]
+          UA = "k50-rootfs-ci"
+          TOK = os.environ.get("GITHUB_TOKEN")
+          TRIES = 7
 
-          def api(url, accept, dst_):
-              h = {"User-Agent": "k50-rootfs-ci", "Accept": accept}
-              tok_ = os.environ.get("GITHUB_TOKEN")
-              if tok_:
-                  h["Authorization"] = "Bearer " + tok_
-              req = urllib.request.Request(url, headers=h)
-              with urllib.request.urlopen(req, timeout=600) as r, open(dst_, "wb") as f:
-                  while chunk := r.read(1 << 20):
-                      f.write(chunk)
+          def backoff(n, what, err):
+              if n + 1 >= TRIES:
+                  sys.exit(f"{what} 重试 {TRIES} 次仍失败：{err}")
+              wait = 2 ** n
+              print(f"  {what} 第 {n + 1} 次失败（{err}），{wait} 秒后重试", flush=True)
+              time.sleep(wait)
+
+          def auth(accept):
+              h = {"User-Agent": UA, "Accept": accept}
+              if TOK:
+                  h["Authorization"] = "Bearer " + TOK
+              return h
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *a, **k):
+                  return None
+
+          def open_api(url, accept):
+              """GET 一次 API 端点，返回 (响应或 None, 302 目标或 None, 错误或 None)。"""
+              try:
+                  return (
+                      urllib.request.build_opener(NoRedirect).open(
+                          urllib.request.Request(url, headers=auth(accept)),
+                          timeout=120,
+                      ), None, None,
+                  )
+              except urllib.error.HTTPError as e:
+                  if e.code in (301, 302, 303, 307, 308):
+                      return None, e.headers.get("Location"), None
+                  if e.code >= 500 or e.code == 429:
+                      return None, None, e.code
+                  sys.exit(f"{url} -> HTTP {e.code}")
+              except (urllib.error.URLError, TimeoutError, OSError) as e:
+                  return None, None, e
+
+          def save(resp, dst_):
+              with resp, open(dst_, "wb") as f:
+                  shutil.copyfileobj(resp, f, 1 << 20)
+
+          def fetch_api(url, accept, dst_):
+              """下 API 端点：200 直接存盘，302 就转 CDN 直链继续。"""
+              for n in range(TRIES):
+                  r, loc, err = open_api(url, accept)
+                  if err is not None:
+                      backoff(n, url, err)
+                      continue
+                  if loc:
+                      fetch_cdn(loc, dst_)
+                      return
+                  save(r, dst_)
+                  return
+
+          def fetch_cdn(url, dst_):
+              """CDN 直链：不带 Authorization（S3 会拒双重签名），同样退避。"""
+              for n in range(TRIES):
+                  try:
+                      req = urllib.request.Request(url, headers={"User-Agent": UA})
+                      save(urllib.request.urlopen(req, timeout=600), dst_)
+                      return
+                  except (urllib.error.HTTPError, urllib.error.URLError,
+                          TimeoutError, OSError) as e:
+                      backoff(n, url, e)
+
+          def get_json(url):
+              for n in range(TRIES):
+                  r, loc, err = open_api(url, "application/vnd.github+json")
+                  if err is not None:
+                      backoff(n, url, err)
+                      continue
+                  with r:
+                      return json.load(r)
 
           rel = re.match(
               r"^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/(.+)$",
@@ -167,41 +238,30 @@ jobs:
               src,
           )
           if not rel and not arc:
-              # 非 github 发布物：交给 curl，带重试
               sys.exit(subprocess.call(
                   ["curl", "-fsSL", "--retry", "5", "--retry-all-errors",
                    "-o", dst, src]))
           if arc:
               o, r_, ref = arc.groups()
-              print(f"archive {o}/{r_}@{ref}")
-              api(f"https://api.github.com/repos/{o}/{r_}/tarball/{ref}",
-                  "application/vnd.github+json", dst)
+              print(f"archive {o}/{r_}@{ref}", flush=True)
+              fetch_api(f"https://api.github.com/repos/{o}/{r_}/tarball/{ref}",
+                        "application/vnd.github+json", dst)
               sys.exit(0)
 
           owner, repo, tag, name = rel.groups()
-          hdrs = {"User-Agent": "k50-rootfs-ci", "Accept": "application/vnd.github+json"}
-          tok = os.environ.get("GITHUB_TOKEN")
-          if tok:
-              hdrs["Authorization"] = "Bearer " + tok
-
-          url = f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
-          req = urllib.request.Request(url, headers=hdrs)
-          with urllib.request.urlopen(req, timeout=60) as r:
-              rel = json.load(r)
-
-          hit = [a for a in rel.get("assets", []) if a["name"] == name]
+          print(f"release {tag} -> 查资产 {name}", flush=True)
+          assets = get_json(
+              f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+          ).get("assets", [])
+          hit = [a for a in assets if a["name"] == name]
           if not hit:
-              have = ", ".join(a["name"] for a in rel.get("assets", []))
+              have = ", ".join(a["name"] for a in assets)
               sys.exit(f"release {tag} 里没有 {name}；现有资产：{have}")
-          asset_id = hit[0]["id"]
-          print(f"release {tag} -> asset {name} id={asset_id} size={hit[0]['size']}")
-
-          hdrs["Accept"] = "application/octet-stream"
-          url = f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
-          req = urllib.request.Request(url, headers=hdrs)
-          with urllib.request.urlopen(req, timeout=600) as r, open(dst, "wb") as f:
-              while chunk := r.read(1 << 20):
-                  f.write(chunk)
+          print(f"  asset id={hit[0]['id']} size={hit[0]['size']}", flush=True)
+          fetch_api(
+              f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{hit[0]['id']}",
+              "application/octet-stream", dst,
+          )
           PYEOF
           chmod +x work/fetch.py
           python3 --version
