@@ -292,9 +292,12 @@ jobs:
           mkdir -p work
           python3 work/fetch.py "$URL" work/modules.tar.gz
           echo "模块包 $(stat -c%s work/modules.tar.gz) 字节"
-          tar -tzf work/modules.tar.gz | sed -n '1,5p'
+          # 先落到文件：上面 `tar | sed` 让 sed 提前退出，tar 会收到 SIGPIPE
+          # （实测日志 "tar: stdout: write error"），断言不能再从管道里读
+          tar -tzf work/modules.tar.gz > work/modules.list
+          sed -n '1,5p' work/modules.list
           # 没有 .ko 说明包是空壳或下坏了，别把空目录打进镜像
-          if ! tar -tzf work/modules.tar.gz | grep -q '\.ko$'; then
+          if ! grep -q '\.ko$' work/modules.list; then
             echo "::error::模块包里一个 .ko 都没有"
             exit 1
           fi
